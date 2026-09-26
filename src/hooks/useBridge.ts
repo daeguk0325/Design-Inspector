@@ -156,6 +156,12 @@ export function useBridge(initialUrl: string): BridgeApi {
   const [sessionBindingId, setSessionBindingId] = useState<string | null>(null);
   const [routeEpoch, setRouteEpoch] = useState<number | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  /**
+   * Whether the frame has finished navigating to the target. A frame still on
+   * its previous document sits on `about:blank` and inherits the app's origin,
+   * so a post aimed at the target origin is refused and logged.
+   */
+  const frameLoadedRef = useRef(false);
   const pendingCapturesRef = useRef(new Map<string, PendingCapture>());
   const pendingPreviewsRef = useRef(new Map<string, PendingPreview>());
   const pendingSessionResetsRef = useRef(new Map<string, number>());
@@ -216,6 +222,13 @@ export function useBridge(initialUrl: string): BridgeApi {
       if (!iframe?.contentWindow) return null;
       const origin = loadedUrl ? targetOriginFor(loadedUrl) : null;
       if (!origin) return null;
+      // The target URL is set before the frame has navigated to it, and a frame
+      // still on its previous document is on `about:blank`, which inherits the
+      // parent's origin. Posting then is not a silent no-op: the browser refuses
+      // the origin check, logs an error, and drops the message. It self-healed
+      // through the load handler, which is why this was only ever console noise —
+      // but the handshake was relying on a retry to cover its own race.
+      if (!frameLoadedRef.current) return null;
       localSeq += 1;
       const requestId = makeRequestId();
       iframe.contentWindow.postMessage(
@@ -372,6 +385,9 @@ export function useBridge(initialUrl: string): BridgeApi {
   }, [sendHello]);
 
   const reconnect = useCallback(() => {
+    // The frame's load event is what makes posting to it legal, so this is also
+    // where the flag that `post` checks gets set.
+    frameLoadedRef.current = true;
     pendingHelloRef.current.clear();
     clearPendingSessionResets();
     clearCaptures();
@@ -447,6 +463,9 @@ export function useBridge(initialUrl: string): BridgeApi {
       clearCaptures();
       cancelPendingPreviews('The target changed.');
       setTargetUrl(target);
+      // Cleared before the new URL is set, so nothing is posted into the frame
+      // while it is still showing the previous target.
+      frameLoadedRef.current = false;
       setLoadedUrl(frameUrl);
       connIdRef.current = null;
       docGenRef.current = null;

@@ -387,4 +387,61 @@ describe('PreviewSidecarParser', () => {
     expect(parser.flush().candidate).not.toBeNull();
     expect(parser.stats.blocksSuppressed).toBe(0);
   });
+
+  it('strips a block whose info string is on the line below the fence', () => {
+    // Observed from a real 9B in the real app: it wrote the fence bare and the
+    // tag on the next line. No line of that matches the opening-fence pattern,
+    // so the whole JSON payload rendered as visible text — the exact outcome the
+    // near-miss tolerance exists to prevent, reached by a shape it missed.
+    const body = `${KOREAN_PREFIX}\`\`\`\ndesign-inspector-preview\n${VALID_BLOCK}\n\`\`\`\n`;
+    const { text, candidate } = run([body]);
+    expect(text).toBe(KOREAN_PREFIX);
+    expect(candidate).toEqual({
+      version: 1,
+      rules: [{ target: 1, declarations: { 'border-radius': '10px', color: '#112233' } }],
+    });
+  });
+
+  it('strips a split fence with a misspelled tag too', () => {
+    const body = `${KOREAN_PREFIX}\`\`\`\ndesign-insector-preview\n${VALID_BLOCK}\n\`\`\`\n`;
+    const { text, candidate, parser } = run([body]);
+    expect(text).toBe(KOREAN_PREFIX);
+    expect(candidate).not.toBeNull();
+    expect(parser.stats.blocksNearMiss).toBe(1);
+  });
+
+  it('strips a split fence at every chunk boundary', () => {
+    // The held fence has to survive a fragment boundary, including one landing
+    // in the middle of the tag line.
+    const body = `${KOREAN_PREFIX}\`\`\`\ndesign-inspector-preview\n${VALID_BLOCK}\n\`\`\`\n`;
+    for (const size of [1, 2, 3, 5, 7, 13, 29]) {
+      const { text, candidate } = run(splitEvery(body, size));
+      expect({ size, text }).toEqual({ size, text: KOREAN_PREFIX });
+      expect({ size, ok: candidate !== null }).toEqual({ size, ok: true });
+    }
+  });
+
+  it('still shows an ordinary code fence whose info string is on the next line', () => {
+    // The hold-back must not swallow a code block the model wrote for the user.
+    const body = `${KOREAN_PREFIX}\`\`\`\njs\nconst a = 1;\n\`\`\`\n`;
+    const { text, candidate } = run([body]);
+    expect(candidate).toBeNull();
+    expect(text).toBe(`${KOREAN_PREFIX}\`\`\`\njs\nconst a = 1;\n\`\`\`\n`);
+  });
+
+  it('shows a bare fence when nothing follows it', () => {
+    const body = `${KOREAN_PREFIX}조회 예시\n\`\`\`\n`;
+    const { text } = run([body]);
+    expect(text).toBe(body);
+  });
+
+  it('removes a suppressed block that arrived in split-fence form', () => {
+    const body = `${KOREAN_PREFIX}\`\`\`\ndesign-inspector-preview\n${VALID_BLOCK}\n\`\`\`\n`;
+    const parser = new PreviewSidecarParser({}, { suppressBlock: true });
+    let text = '';
+    for (const fragment of splitEvery(body, 4)) text += parser.push(fragment).text;
+    text += parser.flush().text;
+    expect(text).toBe(KOREAN_PREFIX);
+    expect(parser.stats.blocksSuppressed).toBe(1);
+  });
 });

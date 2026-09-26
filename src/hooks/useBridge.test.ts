@@ -154,6 +154,12 @@ function mount(): Harness {
     first.iframeRef.current = iframe;
     first.loadTarget(TARGET_URL, FRAME_URL);
   });
+  // A real frame fires load once it has navigated, and posting before that is a
+  // refused origin check rather than a silent no-op. The harness models the
+  // event, so the hook's own guard is exercised the way the browser drives it.
+  act(() => {
+    (current as unknown as BridgeApi).reconnect();
+  });
   let sequence = 0;
   const posted = (): Posted[] =>
     spy.mock.calls.map((call) => call[0] as Posted);
@@ -223,6 +229,21 @@ function mount(): Harness {
     connect,
   };
 }
+
+describe('useBridge frame load gate', () => {
+  it('posts nothing while the frame is still on its previous document', () => {
+    // A frame that has not navigated is on about:blank, which inherits the app's
+    // own origin, so a post aimed at the target origin is refused by the browser
+    // and logged. The handshake used to rely on its own retry to cover this.
+    const bridge = mount();
+    const before = bridge.posted().length;
+    bridge.api.loadTarget('https://other.example', 'https://other.example/');
+    // loadTarget clears the flag, so nothing new may go out until the frame loads.
+    expect(bridge.posted().length).toBe(before);
+    bridge.api.reconnect();
+    expect(bridge.posted().length).toBeGreaterThan(before);
+  });
+});
 
 describe('useBridge confirmed deselect', () => {
   it('resolves true once the target snapshot no longer holds the selection', async () => {

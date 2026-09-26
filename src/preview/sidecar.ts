@@ -20,6 +20,8 @@ export interface PreviewSidecarStats {
 const OPENING_FENCE_RE = new RegExp('^`{3}' + PREVIEW_BLOCK_LANGUAGE + '[ \\t]*$', 'i');
 const CLOSING_FENCE_RE = /^`{3,}[ \t]*$/;
 const FENCE_INFO_RE = /^`{3,}([A-Za-z0-9][A-Za-z0-9 _-]*)[ \t]*$/;
+/** A fence carrying nothing at all, whose info string may be on the next line. */
+const BARE_FENCE_RE = /^`{3,}[ \t]*$/;
 
 /**
  * How wrong an info string may be and still count as an attempt at ours.
@@ -106,6 +108,13 @@ export class PreviewSidecarParser {
   private nearMiss = 0;
   private suppressed = 0;
   private readonly suppress: boolean;
+  /**
+   * A bare fence line held back for one line, because the info string may be on
+   * the line below it. The newline flag rides along because the line was already
+   * split off the buffer when it was held, and losing it would silently join
+   * this fence to the next line at end of stream.
+   */
+  private heldFence: { line: string; newline: boolean } | null = null;
 
   constructor(context: PreviewValidationContext = {}, options: PreviewSidecarOptions = {}) {
     this.context = context;
@@ -157,6 +166,12 @@ export class PreviewSidecarParser {
       this.lineBuffer = '';
       text = this.consumeLine(rawLine, false);
     }
+    // A fence held back for a look-ahead that never arrived is just prose.
+    if (this.heldFence !== null) {
+      const held = this.heldFence;
+      this.heldFence = null;
+      text += held.newline ? `${held.line}\n` : held.line;
+    }
     if (this.insideBlock) {
       this.unterminated += 1;
       this.discardBlock();
@@ -180,6 +195,9 @@ export class PreviewSidecarParser {
 
   private drainPartial(): string {
     if (this.insideBlock) return '';
+    // A held fence has not been shown yet; emitting its characters now would put
+    // half of it in the answer and leave nothing to retract.
+    if (this.heldFence !== null) return '';
     if (this.lineBuffer.length <= this.emittedLength) return '';
     if (this.emittedLength === 0 && AMBIGUOUS_FENCE_RE.test(this.lineBuffer)) return '';
     const fresh = this.lineBuffer.slice(this.emittedLength);
@@ -198,9 +216,42 @@ export class PreviewSidecarParser {
       this.appendBlockLine(line);
       return '';
     }
+    // A bare fence from the previous line is waiting to learn whether the line
+    // after it is our info string. Observed from a real 9B, which wrote
+    //
+    //   ```
+    //   design-inspector-preview
+    //   {"version":1,...}
+    //   ```
+    //
+    // No line of that matches OPENING_FENCE_RE, so the whole payload rendered as
+    // visible text — the exact outcome the near-miss tolerance exists to prevent,
+    // reached by a shape it did not cover. The cost of covering it is that a bare
+    // fence is emitted one line late, which for an ordinary code block is a
+    // difference no reader can see.
+    if (this.heldFence !== null) {
+      const held = this.heldFence;
+      this.heldFence = null;
+      const info = line.trim().toLowerCase();
+      if (info === PREVIEW_BLOCK_LANGUAGE || isNearMissInfo(info)) {
+        this.pendingBlock = null;
+        this.openBlock(info !== PREVIEW_BLOCK_LANGUAGE);
+        this.emittedLength = 0;
+        return '';
+      }
+      // An ordinary fence with its info string below it: release both lines.
+      this.emittedLength = 0;
+      const combined = `${held.line}\n${rawLine}`;
+      return withNewline ? `${combined}\n` : combined;
+    }
     if (OPENING_FENCE_RE.test(line)) {
       this.pendingBlock = null;
       this.openBlock(false);
+      this.emittedLength = 0;
+      return '';
+    }
+    if (BARE_FENCE_RE.test(line)) {
+      this.heldFence = { line, newline: withNewline };
       this.emittedLength = 0;
       return '';
     }
