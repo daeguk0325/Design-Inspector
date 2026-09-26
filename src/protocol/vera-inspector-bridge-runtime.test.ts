@@ -647,6 +647,36 @@ describe('preview apply', () => {
     expect(previewAttributes(target)).toEqual([]);
   });
 
+  it('applies spacing between items while still refusing the flex and grid properties', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountElement('spacing-target');
+    harness.freeze(true);
+    harness.mark(target);
+
+    const results = harness.apply('bind-1', 'tx-gap', [
+      {
+        anchor: testIdAnchor('spacing-target'),
+        declarations: { gap: '12px', 'row-gap': '8px', 'column-gap': '16px' },
+      },
+    ]);
+    expect(results[0]?.payload['status']).toBe('applied');
+    const css = previewStyleLayers().map((sheet) => sheet.textContent ?? '').join('\n');
+    expect(css).toContain('gap:12px');
+    expect(css).toContain('row-gap:8px');
+    expect(css).toContain('column-gap:16px');
+
+    // The neighbours of gap stay forbidden: allowlisting spacing must not open
+    // the door to restructuring the layout.
+    for (const declarations of [{ 'flex-direction': 'column' }, { 'grid-gap': '12px' }]) {
+      const rejected = harness.apply('bind-1', 'tx-layout', [
+        { anchor: testIdAnchor('spacing-target'), declarations },
+      ]);
+      expect(rejected[0]?.payload['status']).toBe('rejected');
+    }
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
   it('rejects malformed payloads and never mutates', () => {
     const harness = createHarness();
     harness.hello();

@@ -136,8 +136,8 @@ describe('formatStyleFacts', () => {
   it('renders the record as a citation-marked block', () => {
     const block = formatStyleFacts(facts(), '({1})', 'PrimaryButton');
     expect(block.lines).toEqual([
-      '({1}) PrimaryButton  box=12px 16px  radius=8px  color=#1e1e1e  bg=#3884ff',
-      '     font=600 14px/1.55 Pretendard  label="주문하기"  at 24,180 120x40  inside header.nav > main',
+      '({1}) PrimaryButton  padding:12px 16px  border-radius:8px  color:#1e1e1e  background-color:#3884ff',
+      '     font-weight:600 font-size:14px line-height:1.55 font-family:Pretendard  label="주문하기"  at 24,180 120x40  inside header.nav > main',
       '     style=display:inline-flex, gap:8px',
     ]);
     expect(block.truncated).toBe(false);
@@ -152,18 +152,18 @@ describe('formatStyleFacts', () => {
     const even = formatStyleFacts({ props: {
       'padding-top': '8px', 'padding-right': '8px', 'padding-bottom': '8px', 'padding-left': '8px',
     } }, '({1})');
-    expect(even.lines[0]).toBe('({1}) element  box=8px');
+    expect(even.lines[0]).toBe('({1}) element  padding:8px');
     const pair = formatStyleFacts({ props: {
       'padding-top': '4px', 'padding-right': '8px', 'padding-bottom': '4px', 'padding-left': '8px',
     } }, '({1})');
-    expect(pair.lines[0]).toBe('({1}) element  box=4px 8px');
+    expect(pair.lines[0]).toBe('({1}) element  padding:4px 8px');
   });
 
   it('keeps all four sides when only one differs', () => {
     const odd = formatStyleFacts({ props: {
       'padding-top': '4px', 'padding-right': '8px', 'padding-bottom': '4px', 'padding-left': '12px',
     } }, '({1})');
-    expect(odd.lines[0]).toBe('({1}) element  box=4px 8px 4px 12px');
+    expect(odd.lines[0]).toBe('({1}) element  padding:4px 8px 4px 12px');
   });
 
   it('omits a zero box rather than claiming padding of zero', () => {
@@ -176,7 +176,7 @@ describe('formatStyleFacts', () => {
 
   it('reports only the attributes that were measured', () => {
     const partial = formatStyleFacts({ props: { color: '#1e1e1e' } }, '({2})');
-    expect(partial.lines).toEqual(['({2}) element  color=#1e1e1e']);
+    expect(partial.lines).toEqual(['({2}) element  color:#1e1e1e']);
   });
 
   it('keeps a label that reads like an instruction as inert quoted data', () => {
@@ -199,7 +199,7 @@ describe('formatStyleFacts', () => {
     expect(block.truncated).toBe(true);
     expect(block.lines.join('\n').length).toBeLessThanOrEqual(STYLE_FACT_RECORD_CHARS);
     // Color survives the drop order; motion does not.
-    expect(block.lines.join('\n')).toContain('color=');
+    expect(block.lines.join('\n')).toContain('color:');
     expect(block.lines.join('\n')).not.toContain('transform=');
   });
 

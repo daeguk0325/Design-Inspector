@@ -83,9 +83,6 @@ const DENIED_PROPERTIES = new Set([
   'grid-template-areas',
   'grid-template-columns',
   'grid-template-rows',
-  'gap',
-  'row-gap',
-  'column-gap',
   'content',
   'transform',
   'transform-origin',
@@ -145,6 +142,9 @@ const LENGTH_PROPERTIES: readonly string[] = [
   'border-bottom-right-radius',
   'border-bottom-left-radius',
   'letter-spacing',
+  'gap',
+  'row-gap',
+  'column-gap',
 ];
 
 const LENGTH_LIST_PROPERTIES: readonly string[] = [

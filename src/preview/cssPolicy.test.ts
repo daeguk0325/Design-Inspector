@@ -41,6 +41,7 @@ const VALID_SAMPLES: Record<string, string> = {
   'font-size': 'larger',
   'font-style': 'italic',
   'font-weight': 'bold',
+  gap: '12px',
   height: '48px',
   'letter-spacing': '0.02em',
   'line-height': 'normal',
@@ -60,6 +61,8 @@ const VALID_SAMPLES: Record<string, string> = {
   'padding-left': '4px',
   'padding-right': '4px',
   'padding-top': '4px',
+  'row-gap': '8px',
+  'column-gap': '16px',
   'text-align': 'center',
   'text-decoration-line': 'underline line-through',
   'text-overflow': 'ellipsis',
@@ -82,9 +85,33 @@ describe('visual-only CSS allowlist', () => {
   it('never allowlists layout, stacking, animation, content or custom properties', () => {
     for (const property of VISUAL_ONLY_CSS_PROPERTIES) {
       expect(property.startsWith('--')).toBe(false);
+      // gap/row-gap/column-gap are deliberately absent from this list: they are
+      // pure spacing and were allowlisted so a spacing request stops getting its
+      // whole proposal rejected.
       expect(property).not.toMatch(
-        /^(position|top|right|bottom|left|inset|z-index|display|float|clear|content|transform|filter|background|background-image|transition|animation|grid|grid-template|grid-template-columns|grid-template-rows|grid-auto-flow|grid-column|grid-row|gap|row-gap|column-gap|flex|flex-basis|flex-direction|flex-flow|flex-grow|flex-shrink|flex-wrap|order|align-content|align-items|align-self|justify-content|justify-items|justify-self|place-content|place-items|place-self|cursor|pointer-events|user-select|will-change|contain|content-visibility|writing-mode|direction|box-sizing|visibility|list-style|transition-[a-z-]+|animation-[a-z-]+)$/,
+        /^(position|top|right|bottom|left|inset|z-index|display|float|clear|content|transform|filter|background|background-image|transition|animation|grid|grid-template|grid-template-columns|grid-template-rows|grid-auto-flow|grid-column|grid-row|flex|flex-basis|flex-direction|flex-flow|flex-grow|flex-shrink|flex-wrap|order|align-content|align-items|align-self|justify-content|justify-items|justify-self|place-content|place-items|place-self|cursor|pointer-events|user-select|will-change|contain|content-visibility|writing-mode|direction|box-sizing|visibility|list-style|transition-[a-z-]+|animation-[a-z-]+)$/,
       );
+    }
+  });
+
+  it('accepts spacing between items', () => {
+    const check = validateDeclarations({ gap: '12px', 'row-gap': '8px', 'column-gap': '16px' });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.declarations).toEqual({ gap: '12px', 'row-gap': '8px', 'column-gap': '16px' });
+  });
+
+  it('still refuses the flex and grid properties that sit next to gap', () => {
+    for (const declarations of [
+      { 'flex-direction': 'column' },
+      { 'grid-template-columns': '1fr 1fr' },
+      { 'justify-content': 'center' },
+      { 'align-items': 'center' },
+    ]) {
+      const check = validateDeclarations(declarations);
+      expect(check.ok).toBe(false);
+      if (check.ok) continue;
+      expect(check.reason).toBe('forbidden-property');
     }
   });
 

@@ -615,6 +615,8 @@ const PREVIEW_LENGTH_PROPERTIES: readonly string[] = [
   'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
   'border-top-left-radius', 'border-top-right-radius', 'border-bottom-right-radius',
   'border-bottom-left-radius', 'letter-spacing',
+  // Spacing between items. Pure spacing, no layout side effect beyond the gap.
+  'gap', 'row-gap', 'column-gap',
 ];
 
 const PREVIEW_LENGTH_LIST_PROPERTIES: readonly string[] = [

@@ -188,14 +188,15 @@ function sides(props: Record<string, string>, prefix: string): string[] | null {
   return values;
 }
 
-function fontSummary(props: Record<string, string>): string | null {
-  const { 'font-weight': weight, 'font-size': size, 'line-height': lineHeight, 'font-family': family } = props;
-  if (weight === undefined && size === undefined && family === undefined) return null;
-  // CSS shorthand order: weight, then size[/line-height], then family.
-  const lead = [weight, size].filter((part): part is string => part !== undefined).join(' ');
-  const familyPart = family === undefined ? '' : ` ${family}`;
-  if (lead === '') return family?.trim() ?? null;
-  return `${lead}${lineHeight === undefined ? '' : `/${lineHeight}`}${familyPart}`;
+/** The font longhands, each under its own name so nothing needs decoding. */
+function fontLonghands(props: Record<string, string>): string | null {
+  const parts: string[] = [];
+  for (const property of ['font-weight', 'font-size', 'line-height', 'font-family'] as const) {
+    const value = props[property];
+    if (value === undefined) continue;
+    parts.push(`${property}:${value}`);
+  }
+  return parts.length === 0 ? null : parts.join(' ');
 }
 
 /** Properties already given a dedicated segment in the rendered line. */
@@ -205,20 +206,32 @@ const CURATED_PROPS: ReadonlySet<string> = new Set([
   'font-weight', 'font-size', 'line-height', 'font-family',
 ]);
 
+/**
+ * The facts head/tail use real CSS property names, not a compact shorthand.
+ *
+ * The shorthand (`box=`, `radius=`, `font=`) was a token saving, and it has
+ * cost twice. First the model emitted `box` as a preview-block declaration key,
+ * which the validator rejects. Then, with that fixed, a real 9B run showed it
+ * quoting the shorthand straight back in its visible answer — `box=12px 16px`,
+ * `radius=8px` — which is unreadable to the person the answer is for and is
+ * exactly the copy-paste-text complaint the prompt rewrite was meant to end.
+ * Real names make the facts and the declaration keys the same vocabulary, so
+ * the mapping rule in the system prompt disappears with them.
+ */
 function factsLines(facts: StyleFacts): string[] {
   const { props } = facts;
   const head: string[] = [];
   const tail: string[] = [];
   const padding = sides(props, 'padding');
-  if (padding !== null) head.push(`box=${padding.join(' ')}`);
+  if (padding !== null) head.push(`padding:${padding.join(' ')}`);
   const radius = props['border-radius'];
-  if (radius !== undefined && !ZERO_LENGTH.test(radius)) head.push(`radius=${radius}`);
+  if (radius !== undefined && !ZERO_LENGTH.test(radius)) head.push(`border-radius:${radius}`);
   const color = props['color'];
-  if (color !== undefined) head.push(`color=${color}`);
+  if (color !== undefined) head.push(`color:${color}`);
   const background = props['background-color'];
-  if (background !== undefined) head.push(`bg=${background}`);
-  const font = fontSummary(props);
-  if (font !== null) tail.push(`font=${font}`);
+  if (background !== undefined) head.push(`background-color:${background}`);
+  const font = fontLonghands(props);
+  if (font !== null) tail.push(font);
   if (facts.label !== undefined) tail.push(`label="${facts.label}"`);
   if (facts.geometry !== undefined) {
     const { x, y, width, height } = facts.geometry;
