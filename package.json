@@ -1,0 +1,46 @@
+{
+  "name": "design-inspector-tool",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Design Inspector Tool (App A) — visual UI inspection to deterministic coding-agent prompt. Governed by Design_Inspector_Tool_BUILD_PROMPT_v4.2.md",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node scripts/with-launcher.mjs",
+    "dev:web": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "oxlint src bridge scripts",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@lexical/react": "^0.51.0",
+    "html2canvas": "^1.4.1",
+    "http-proxy-3": "2.0.1",
+    "katex": "^0.18.9",
+    "lexical": "^0.51.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "jsdom": "^26.1.0",
+    "oxlint": "^1.85.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^3.2.4",
+    "ws": "8.21.3"
+  }
+}

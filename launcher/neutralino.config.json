@@ -1,0 +1,50 @@
+{
+  "applicationId": "tools.designinspector.launcher",
+  "version": "1.0.0",
+  "applicationName": "Design Inspector Launcher",
+  "author": "Design Inspector",
+  "description": "검사 대상 프로젝트 연결",
+  "defaultMode": "window",
+  "port": 0,
+  "documentRoot": "/resources/",
+  "url": "/",
+  "enableServer": true,
+  "enableNativeAPI": true,
+  "tokenSecurity": "none",
+  "nativeAllowList": [
+    "os.getEnv",
+    "os.showFolderDialog",
+    "os.execCommand",
+    "os.spawnProcess",
+    "os.updateSpawnedProcess",
+    "filesystem.readFile",
+    "filesystem.writeFile",
+    "app.exit",
+    "window.minimize",
+    "window.move",
+    "window.getPosition",
+    "events.*"
+  ],
+  "modes": {
+    "window": {
+      "title": "Design Inspector",
+      "width": 480,
+      "height": 600,
+      "minWidth": 440,
+      "minHeight": 520,
+      "center": true,
+      "resizable": false,
+      "borderless": true,
+      "exitProcessOnClose": false,
+      "icon": "/resources/icon.png"
+    }
+  },
+  "applicationIcon": "resources/icon.png",
+  "cli": {
+    "binaryName": "design-inspector-launcher",
+    "resourcesPath": "/resources/",
+    "clientLibrary": "/resources/neutralino.js",
+    "clientVersion": "6.9.0",
+    "binaryVersion": "6.9.0"
+  }
+}

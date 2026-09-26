@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Design Inspector — 검사 대상 연결</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header id="titlebar">
+    <span class="brand-mark sm" aria-hidden="true"><img src="icon.png" alt="" /></span>
+    <span class="tb-title">Design Inspector</span>
+    <span class="tb-btns" id="tb-btns">
+      <button id="btn-min" type="button" title="최소화" aria-label="최소화">—</button>
+      <button id="btn-close" type="button" title="종료 (실행 중인 서버도 함께 종료)" aria-label="종료">×</button>
+    </span>
+  </header>
+
+  <div class="app">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><img src="icon.png" alt="" /></span>
+      <div style="flex:1;min-width:0">
+        <div class="brand-name">Design Inspector</div>
+        <div class="brand-sub">검사 대상 연결</div>
+      </div>
+      <span id="status-pill" class="pill" role="status"><span class="dot" aria-hidden="true"></span><span id="status-text">대기 중</span></span>
+    </div>
+
+    <div id="view-splash" class="card">
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="splash-text">이전 대상을 확인하고 있습니다…</p>
+    </div>
+
+    <div id="view-main" class="card hidden">
+      <h1>검사할 프로젝트 폴더</h1>
+      <p class="muted">폴더만 고르고 확인을 누르면 개발 서버가 자동으로 실행됩니다. 창을 닫으면 서버도 함께 종료됩니다.</p>
+
+      <div id="recent-wrap" class="hidden">
+        <div class="field-label">최근 대상</div>
+        <div id="recent-list"></div>
+      </div>
+
+      <label class="field-label" for="folder-path">프로젝트 폴더</label>
+      <div class="folder-row">
+        <input id="folder-path" type="text" readonly placeholder="선택된 폴더 없음" />
+        <button id="btn-browse" type="button" class="btn">찾아보기…</button>
+      </div>
+
+      <div id="project-info" class="project-info hidden">
+        <div><span class="muted">프로젝트</span> <b id="proj-name">—</b></div>
+        <div><span class="muted">실행 명령</span> <code id="proj-script">—</code></div>
+      </div>
+
+      <p id="error-line" class="error hidden" role="alert"></p>
+
+      <div class="actions">
+        <button id="btn-confirm" type="button" class="btn primary" disabled>확인하고 시작</button>
+      </div>
+      <p class="muted small">시작 후 이 창은 최소화됩니다. 닫으면 실행 중인 서버도 함께 종료됩니다.</p>
+    </div>
+
+    <div id="view-running" class="card hidden">
+      <h1>개발 서버 실행 중</h1>
+      <div class="run-line"><span class="muted">프로젝트</span> <b id="run-name">—</b></div>
+      <div class="run-line"><span class="muted">주소</span> <code id="run-url">—</code></div>
+      <pre id="run-log" class="run-log" aria-label="서버 로그"></pre>
+      <p id="run-error" class="error hidden" role="alert"></p>
+      <div class="actions">
+        <button id="btn-retry" type="button" class="btn hidden">다시 시작</button>
+        <button id="btn-stop" type="button" class="btn">서버 중지</button>
+        <button id="btn-done" type="button" class="btn primary">닫기</button>
+      </div>
+      <p class="muted small">닫으면 실행 중인 서버도 함께 종료됩니다.</p>
+    </div>
+  </div>
+  <script src="/neutralino.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
