@@ -573,6 +573,124 @@ describe('style facts validation', () => {
   });
 });
 
+describe('style facts derived validation', () => {
+  // The `derived` block is the Bridge's own verdict (contrast, truncation, font
+  // load) rather than something read off computed style. The model is told to
+  // quote it rather than recompute it, so a forged or half-shaped verdict has
+  // to be refused at the boundary: a wrong `pass` here is a wrong `pass` in
+  // the answer.
+  function withDerived(derived: unknown) {
+    return check(envelope({
+      type: 'VERA_INSPECTOR_SELECTION',
+      payload: {
+        record: record({
+          styleFacts: { props: { 'background-color': '#3884ff' }, derived },
+        }),
+        activeOrder: ['sel-1'],
+      },
+    }));
+  }
+
+  const VERDICT = {
+    ratio: 4.54,
+    min: 4.5,
+    pass: true,
+    large: false,
+    background: '#3884ff',
+  };
+
+  it('accepts a full derived block, and the unmeasurable form', () => {
+    expect(withDerived({ contrast: VERDICT, truncated: true, fontLoad: 'fallback' }).ok).toBe(true);
+    expect(withDerived({ contrast: { unmeasurable: true } }).ok).toBe(true);
+    // Each field is independently optional: the Bridge measures what it can.
+    expect(withDerived({ truncated: true }).ok).toBe(true);
+    expect(withDerived({ fontLoad: 'unknown' }).ok).toBe(true);
+    // `derived` is a subset, like `props` and like the record itself.
+    expect(withDerived({ fontLoad: 'fallback' }).ok).toBe(true);
+  });
+
+  it('rejects a derived block with an unknown key', () => {
+    expect(withDerived({ contrast: VERDICT, computedRatio: 21 }).ok).toBe(false);
+    expect(withDerived({ contrast: VERDICT, verdict: 'pass' }).ok).toBe(false);
+  });
+
+  it('rejects an empty derived block', () => {
+    // An empty object says "measured, found nothing", which is a different
+    // claim from sending no block at all.
+    expect(withDerived({}).ok).toBe(false);
+    expect(withDerived([]).ok).toBe(false);
+    expect(withDerived('contrast 4.5 pass').ok).toBe(false);
+    expect(withDerived(null).ok).toBe(false);
+  });
+
+  it('rejects `truncated: false`, because only `true` is ever sent', () => {
+    // Same rule as a default-valued CSS property: the unremarkable state is
+    // omitted, so a literal false means the sender is not who it claims.
+    expect(withDerived({ truncated: false }).ok).toBe(false);
+    expect(withDerived({ truncated: 'yes' }).ok).toBe(false);
+    expect(withDerived({ truncated: true }).ok).toBe(true);
+  });
+
+  it('rejects a fontLoad other than fallback or unknown', () => {
+    expect(withDerived({ fontLoad: 'loaded' }).ok).toBe(false);
+    expect(withDerived({ fontLoad: 'error' }).ok).toBe(false);
+    expect(withDerived({ fontLoad: true }).ok).toBe(false);
+  });
+
+  it('rejects a ratio outside 1..21, or one that is not a number', () => {
+    // 1:1 and 21:1 are the arithmetic limits of WCAG 2.x contrast, so nothing
+    // outside that range is a measurement.
+    expect(withDerived({ contrast: { ...VERDICT, ratio: 0.99 } }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, ratio: 21.01 } }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, ratio: 0 } }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, ratio: '4.54' } }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, ratio: Number.NaN } }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, ratio: 1 } }).ok).toBe(true);
+    expect(withDerived({ contrast: { ...VERDICT, ratio: 21 } }).ok).toBe(true);
+  });
+
+  it('rejects a min outside 1..21', () => {
+    expect(withDerived({ contrast: { ...VERDICT, min: 0 } }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, min: 21.5 } }).ok).toBe(false);
+  });
+
+  it('rejects a pass or large flag that is not a boolean', () => {
+    expect(withDerived({ contrast: { ...VERDICT, pass: 'true' } }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, pass: 1 } }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, large: 'false' } }).ok).toBe(false);
+  });
+
+  it('rejects a background that is not a six-digit hex colour', () => {
+    expect(withDerived({ contrast: { ...VERDICT, background: '#fff' } }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, background: 'rgb(56,132,255)' } }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, background: 'white' } }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, background: '#3884ff' } }).ok).toBe(true);
+  });
+
+  it('rejects a contrast object missing a key or carrying an extra one', () => {
+    // The verdict is all-or-nothing: a partial contrast is indistinguishable
+    // from one where the model fills the missing field in itself.
+    const { min: _min, ...withoutMin } = VERDICT;
+    expect(withDerived({ contrast: withoutMin }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, foreground: '#1e1e1e' } }).ok).toBe(false);
+    // An extra key alongside a fully valid verdict is still refused.
+    expect(withDerived({ contrast: { ...VERDICT, note: 'measured by hand' } }).ok).toBe(false);
+  });
+
+  it('rejects unmeasurable: false, which is the absence of a verdict', () => {
+    expect(withDerived({ contrast: { unmeasurable: false } }).ok).toBe(false);
+    expect(withDerived({ contrast: { unmeasurable: 'true' } }).ok).toBe(false);
+    expect(withDerived({ contrast: { unmeasurable: true } }).ok).toBe(true);
+  });
+
+  it('refuses to let a number ride along with unmeasurable', () => {
+    // The whole point of the unmeasurable form is that it stops the model
+    // supplying a number. Carrying one makes the record say both.
+    expect(withDerived({ contrast: { unmeasurable: true, ratio: 4.54 } }).ok).toBe(false);
+    expect(withDerived({ contrast: { unmeasurable: true, ...VERDICT } }).ok).toBe(false);
+  });
+});
+
 describe('snapshot validation', () => {
   it('accepts a canonical live snapshot', () => {
     const res = check(envelope({

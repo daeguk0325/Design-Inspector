@@ -496,6 +496,20 @@ button, input, textarea, select { font: inherit; color: inherit; }
   display: inline-block; width: 9px; height: 9px; margin-right: 5px;
   border: 1px solid var(--border-soft); border-radius: 2px; vertical-align: -1px;
 }
+.cdetails-source { margin-top: 8px; }
+.cdetails-source .cdetails-style-group-label { display: flex; gap: 6px; align-items: baseline; }
+.cdetails-source-code {
+  margin: 0; padding: 6px 0; max-height: 190px; overflow: auto;
+  background: var(--surface-soft); border: 1px solid var(--border-soft); border-radius: 5px;
+  font-family: var(--mono); font-size: 10.5px; line-height: 1.5;
+}
+.cdetails-source-line { display: flex; gap: 8px; padding: 0 8px; white-space: pre; }
+.cdetails-source-line:hover { background: var(--accent-soft); }
+.cdetails-source-no {
+  flex: 0 0 auto; min-width: 2.6em; text-align: right;
+  color: var(--text-3); user-select: none;
+}
+.cdetails-source-text { flex: 1 1 auto; color: var(--text); }
 
 .details-popover {
   position: relative; margin: 0 12px 8px; padding: 12px 34px 10px 12px;

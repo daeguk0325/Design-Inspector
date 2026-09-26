@@ -5,7 +5,8 @@
 | Owner | Owns | Files |
 |---|---|---|
 | Bridge (target runtime or proxy-injected compatibility runtime) | `inspectorFrozen`, inspector mode, live `SelectionRecord`s (incl. measured `styleFacts` §9e), live highlight/label DOM, `connectionId`, `documentGeneration`, `routeEpoch`, runtime CSS preview layers, selectionId→logical anchor registry | `bridge/vera-inspector-bridge.ts`, `scripts/target-proxy.mjs` |
-| App A | session selection intent (`persistedActiveSelectionIds`), chat history, pins + pin order, settings, localStorage, export inputs, preview transactions (`apply`/`undo`/`reset` + decisions), style-fact sanitizing for the state boundary | `src/hooks/*`, `src/state/*`, `src/persistence/*`, `src/preview/*`, `src/style/*` |
+| App A | session selection intent (`persistedActiveSelectionIds`), chat history, proposal decisions, settings, localStorage, export inputs, preview transactions (`apply`/`undo`/`reset` + decisions), style-fact sanitizing for the state boundary, cited-source fetch and cache | `src/hooks/*`, `src/state/*`, `src/persistence/*`, `src/preview/*`, `src/style/*`, `src/target/*` |
+| Supervisor | the project root it is allowed to read from (`job.dir`), the active App origin its routes are gated to, and the cited-source route built on both (§9h) | `scripts/with-launcher.mjs`, `scripts/source-reader.mjs` |
 
 Reconciliation rule: after every new handshake/snapshot, App A filters its
 persisted IDs against the live snapshot (`src/state/reconcile.ts`). IDs absent
@@ -61,7 +62,7 @@ snapshot → reconcile → stale IDs dropped
   document generation; a new generation starts fresh.
 - Numbering: App A owns the active display order; the protocol carries
   `activeOrder` so Vera labels and the App A tray agree (single owner).
-  Export order is separately `order` (first-added); pin order is `pinnedAt`.
+  Export order is separately `order` (first-added).
 - At most 4 selections can be active at once (cap comes from Bridge
   capabilities, App A enforces `Math.min(4, maxSelectionImages)`), so one Send
   carries at most four crops.
@@ -83,12 +84,13 @@ snapshot → reconcile → stale IDs dropped
   Windows reserves `Alt+Shift` for language switching and Chrome swallows
   several `Alt+Shift` chords, so the legacy chord often never reaches the page.
   Explicit `{ active: boolean }` commands with a 400ms double-toggle guard.
-- Freeze ON: listeners attach (capture-phase click interception with
-  `preventDefault`/`stopPropagation`, submit prevention), hover/select active.
-- Freeze OFF: canonical live reset — listeners detached, hover cleared, live
-  highlights + registry cleared, snapshot emitted; App A drops the active set,
-  history preserved. Only `Escape` (clear hover) and the Freeze shortcut are
-  handled; no blanket keyboard blocking (Tab/input/accessibility unaffected).
+- Freeze ON: a pointer shield arms inside the shadow host, the freeze stylesheet
+  is injected, keyboard/editing blockers attach at window capture, the active
+  element is blurred, hover/select become active. See §9g.
+- Freeze OFF: canonical live reset — shield and stylesheet removed, blockers
+  detached, hover cleared, live highlights + registry cleared, snapshot emitted;
+  App A drops the active set, history preserved. The Freeze shortcut and
+  `Escape` stay live throughout, so the user can always get back out.
 
 ## 5b. Target entry
 
@@ -111,7 +113,7 @@ npm run dev (= scripts/with-launcher.mjs)
  ├─ target proxy (OS-assigned port on an isolated 127/8 address per target)
  │    HTTP + WebSocket streaming, redirect/cookie/framing-header rewriting
  ├─ browser handoff: ?target=<canonical>&inspectorToken=<one-time>; App A requests route
- └─ 127.0.0.1:5199 status + App-origin-gated proxy control API
+  └─ 127.0.0.1:5199 status + App-origin-gated proxy control + cited-source API
 ```
 
 - **Ownership:** the Launcher spawns the target via `os.spawnProcess`, closes
@@ -165,7 +167,9 @@ npm run dev (= scripts/with-launcher.mjs)
   only its CSP hash on the isolated route. A native target Bridge takes
   precedence when present. Target-side integration is still required for
   authoritative `file:line` metadata, R3F/Konva hit-testing, or target-specific
-  state coordination. Iframe reloads and Bridge HMR restart HELLO retries, and a
+  state coordination — the proxy invents no location. Once a target does report
+  one, the Supervisor serves the text around it (§9h); the proxy never does.
+  Iframe reloads and Bridge HMR restart HELLO retries, and a
   validated new Bridge connection resets sequence tracking. Hard-coded absolute
   URLs back to the upstream origin also bypass any server-side proxy and remain
   a target concern.
@@ -204,6 +208,31 @@ image) instead of rejecting the request. If the contact sheet cannot be built
 from individual crops, the surviving crops are still sent individually. This
 keeps "select and ask" working on pages where rasterization is partial.
 
+### The images have a job, not just a prohibition
+
+The system prompt used to say only that image text is untrusted and that the
+numbers win. That is a floor, and a floor is not a brief: a model told what an
+image may not be used for still produces a paragraph about the component it
+cannot see any judgement in. The prompt now gives the images work — the outline,
+the balance, how the component sits in its surroundings, what draws the eye — and
+asks for it in a person's terms: look at them the way a person looks at a screen.
+
+The line it has to hold is the scale. **A screenshot has no scale, so a
+measurement is never read off one.** Comparing two facts is reasoning and is
+allowed — is this padding larger than that one, is the alignment consistent, does
+the hierarchy read. Turning pixels into a number is not reasoning, it is
+fabrication, and it is named as such.
+
+The same split governs new values. Describing the **current** state is bound by
+the facts: if a value is not there, it was not measured, and the answer is
+확인 불가 with the property named. **Suggesting** a change may introduce values
+that do not exist yet, because they are the whole point of a suggestion — they just
+have to be marked as proposals rather than presented as measurements.
+
+And the derived tokens are verdicts, not topics. A `contrast`, `text-truncated`
+or `font-load` token is a result the browser already reached: quote it, never
+recompute the ratio, and never replace `unmeasurable` with a number of your own.
+
 ## 6b. Structured CSS preview (auto, runtime only)
 
 - The English system role asks the model to append exactly one fenced block
@@ -214,6 +243,29 @@ keeps "select and ask" working on pages where rasterization is partial.
   only yields a payload for a strictly valid, schema-conformant, allow-listed
   JSON array (`src/preview/sidecar.ts`, `src/preview/cssPolicy.ts`). Invalid,
   oversized, truncated, or errored responses simply produce no preview.
+
+### A fence info string within 2 edits still counts as an attempt
+
+A 9B model that had the exact tag in its context wrote
+`design-insector-preview` — one letter out. The consequence of a near miss is not
+a lost preview: nothing recognises the fence, so the JSON payload is printed
+into the answer as visible text. A fence whose info string is within two Levenshtein
+edits of `design-inspector-preview` is therefore treated as an attempt at ours and
+stripped. Two is the bound: near enough to be a slip of the same token, far enough
+that `design-inspector-preview-note` (five edits) stays ordinary prose, which a
+test pins.
+
+Everything downstream of fence recognition is untouched. A near-miss block goes
+through the identical truncation, oversize and schema-validity path as an exact
+one, so a typo cannot smuggle anything past the validator — the tolerance only
+decides that a block is *ours*, never that it is *acceptable*. A `blocksNearMiss`
+stat makes the slip visible instead of silent.
+
+What it deliberately does **not** fix: a partially streamed near-miss tag can
+flash for a frame or two before the newline completes the line, because the
+streaming guard only hides prefixes of the correct tag. Hiding every unrecognised
+fence would mean hiding the user's own code blocks, and the payload leaking is the
+part that has to be prevented.
 - `usePreviewController` turns one clean assistant completion into a single
   atomic transaction. It resolves `selectorId` to a strong anchor, applies a
   bridge-owned `<style>` layer through `VERA_INSPECTOR_PREVIEW_APPLY`, and only
@@ -228,9 +280,13 @@ keeps "select and ask" working on pages where rasterization is partial.
 ## 7. Export (§19)
 
 Pure function `buildAgentPrompt({ session, active })`: latest raw user request +
-deduped reconciled active (first-added order) + pins (`pinnedAt` order) +
-fixed template, `\n` endings, exactly one trailing newline. No AI call.
+deduped reconciled active (first-added order) + a fixed template, `\n` endings,
+exactly one trailing newline. No AI call.
 `buildRawTranscript` is the separate untransformed export.
+
+Pin-based constraints are gone. The accepted change log is the durable record of
+what was decided, and it is exported through the change-log panel and the
+proposal document instead (§9f).
 
 ## 8. Persistence (§15)
 
@@ -243,7 +299,9 @@ re-reconciled against the Bridge snapshot. Split ratio uses the independent
 `design-inspector/layout-v1` key so resizing never rewrites session data.
 Visual crop bytes stay in memory for the active app session and are never placed
 in the localStorage envelope; only preview transaction state and design
-decisions are persisted.
+decisions are persisted. The cited-source window cache is the same: a
+module-level LRU in `src/target/sourceCache.ts` that dies with the page, never
+the envelope.
 
 ## 9. Visual system (§0.1)
 
@@ -382,7 +440,8 @@ per-image mapping lines, the system prompt, and the rendering of a sent message.
 ## 9e. Style facts (measured DOM evidence)
 
 A selection carries the values the target's own CSS produced, so the model can
-answer "what colour is this?" with a hex code instead of "cannot tell".
+answer "what colour is this?" with a hex code instead of "cannot tell" — and, in
+`derived`, the handful of values it could not have computed for itself.
 
 ### Shape and ownership
 
@@ -391,21 +450,108 @@ answer "what colour is this?" with a hex code instead of "cannot tell".
 is Bridge → snapshot → app state → `CitationSnapshot` → prompt / details panel.
 
 The Bridge is authoritative and extracts live from the DOM in `recordPayload()`:
-one `getComputedStyle` and one `getBoundingClientRect` per record, on every
-emit. There is deliberately **no per-record cache** — a route change nulls
-`rec.target`, so the facts invalidate themselves, and `emitSnapshot` only fires
-on discrete events (freeze, mode, route, selection, request), never on
-hover/scroll/resize, so the live read is cheap.
+one `getComputedStyle` for the longhands and one `getBoundingClientRect` per
+record, on every emit, plus the further `getComputedStyle` calls the derived
+backdrop walk makes up the ancestor chain. There is deliberately **no
+per-record cache** — a route change nulls `rec.target`, so the facts invalidate
+themselves, and `emitSnapshot` only fires on discrete events (freeze, mode, route,
+selection, request), never on hover/scroll/resize, so the live read is cheap.
+
+### Derived measurements are computed, not asked for
+
+`styleFacts.derived?` is an optional top-level key holding values that were
+**measured rather than read**: a contrast verdict, an overflow flag, a font-load
+state. The key is registered in **four** places that have to stay in sync — the
+two TypeScript interfaces (`bridge/vera-inspector-bridge.ts` and
+`src/protocol/types.ts`), `STYLE_FACT_KEYS` in `src/protocol/validate.ts`, and
+`STYLE_FACT_ALLOWED_KEYS` in `src/style/properties.ts` — and gated twice, by
+`isStyleFactsDerivedValid` on the wire and by `sanitizeDerived` at the state
+boundary.
+
+The reason is a measurement that moved. The same two colours came back as 4.80:1
+in one run and 3.2:1 in the next, and a number that changes between two runs of
+the same page is not a measurement. So the arithmetic happens once, in the
+Bridge, where there is only one way to get it right — and where a value that
+cannot be measured is reported as unmeasurable instead of estimated.
+
+`contrast` is a verdict, not a ratio to be recomputed: `{ ratio, min, pass,
+large, background }`, WCAG 2.x. `min` is 4.5, or 3 when the text is large —
+`font-size >= 24px`, or `>= 18.66px` with `font-weight >= 700`. The ratio is
+rounded to two decimals and `pass` is decided from the **rounded** ratio, so the
+printed number and the verdict can never disagree. `background` is the resolved
+backdrop the ratio was measured against, as `#rrggbb`, which is what makes the
+verdict checkable rather than asserted.
+
+**Three outcomes, not two.** A verdict; `{ unmeasurable: true }` when the styles
+*were* read and the backdrop genuinely is not a flat colour — any
+`background-image` other than `none` on the element or anywhere up its ancestor
+chain, or `opacity < 1`; and the key **absent** when the inputs could not be
+read at all, such as an element with no parseable text colour. A measurement
+failure is not an answer, and calling it one would fill every prompt with a
+caveat about something nobody asked about.
+
+The backdrop walk starts at the element, climbs `parentElement` past fully
+transparent backgrounds, and resolves to white at the document root — the
+browser's own canvas default rather than a guess about the design. A partially
+transparent text colour is composited source-over in sRGB first, which is what
+the compositor does. Two things are deliberately **not** accounted for:
+`box-shadow` and an overlapping sibling, because neither appears in the style
+the walk reads.
+
+`truncated` is present only as `true`, and only when `clientWidth > 0` and the
+content overflows its box by more than 1px on either axis. `false` is the
+unremarkable state and is omitted, exactly like a default-valued property: the
+field's absence is the "it fits" answer.
+
+`fontLoad` is only ever `'fallback'` or `'unknown'`. `'fallback'` when the
+document **declares** the first computed family through `document.fonts` and
+`check()` says it did not load. A family the document never declares is a local
+or system font: there is no load event that could have failed, so it produces no
+key at all.
+
+In the prompt this is one tail segment after the font longhands —
+`contrast 4.54:1 min 4.5 pass`, `contrast unmeasurable`, `text-truncated`,
+`font-load fallback` — and in the details popup a `Measured` group carrying a
+swatch of the backdrop the ratio was measured against. An unmeasurable contrast
+says so there rather than showing nothing, because a blank row reads as "no
+problem found".
+
+`contrast` is not a CSS property, which is exactly why the system prompt tells
+the model to quote the token and never recompute a ratio. Under the 1,200-char
+storage budget `derived` and `geometry` are the **last** things dropped, after
+every style group: the group drop order never reaches them.
+
+### Relations between cited elements
+
+`src/style/relations.ts` answers the one question a designer actually asks across
+two elements — do these two overlap? — by intersecting the bounding boxes the
+Bridge already put on each citation. That is pairwise arithmetic in the app: no
+new bridge message, no new protocol surface, no second round trip, and a zero-area
+box is skipped rather than allowed to divide by zero.
+
+In the prompt it appears as a `Measured relations (from the boxes above):`
+section, and only when two or more citations actually intersect. Each line names
+the intersection rectangle, the share of the smaller box it covers as a whole
+percent, and then states the limit in the same sentence: paint order was not
+measured, so which element is in front is unknown.
+
+That last clause is load-bearing. `z-index` and `position` are allow-listed CSS
+**values**, not stacking data, and the Bridge omits both whenever they equal their
+computed default; no ancestor carries geometry; and paint order is not in the
+payload at all. Answering "the badge covers the text" from a rect intersection
+would be a guess wearing a measurement's clothes. The overlap is reported, and
+the stacking question is left explicitly open.
 
 ### The Bridge cannot import from `src/`
 
 `scripts/target-proxy.mjs` transpiles each Bridge source with
 `ts.transpileModule` and concatenates them. There is no module resolution, so
-the allowlist, the defaults table, the sanitizer, and the colour conversion all
-live inline in `bridge/vera-inspector-bridge.ts`. `src/style/properties.ts` keeps
-a second, stricter copy for the app side. **The duplication is the trust
-boundary**: the target controls the payload, so the app drops any property it
-does not recognise rather than trusting the Bridge's list.
+the allowlist, the defaults table, the sanitizer, the colour conversion, and the
+derived-measurement arithmetic all live inline in
+`bridge/vera-inspector-bridge.ts`. `src/style/properties.ts` keeps a second,
+stricter copy for the app side. **The duplication is the trust boundary**: the
+target controls the payload, so the app drops any property it does not recognise
+rather than trusting the Bridge's list.
 
 ### Defaults are per property, not one global list
 
@@ -416,7 +562,9 @@ element while `inline-flex` is the whole point. `STYLE_FACT_DEFAULTS` and
 `STYLE_FACT_ZERO_DEFAULT_PROPS` encode that; a single flat list cannot.
 
 56 longhand properties in five groups (color 10, typography 11, box 19, layout
-12, motion 4). Longhands only — a shorthand would hide a single differing side.
+12, motion 4). `props` is longhands only — a shorthand would hide a single
+differing side. `derived` is a separate key, because a contrast ratio is not
+something CSS has a name for.
 
 Two rules in here were **wrong until a real page was measured** (see
 `VERIFICATION_REPORT.md`, "Live real-capture verification"):
@@ -436,15 +584,24 @@ Two rules in here were **wrong until a real page was measured** (see
 `fill` and `stroke` initial to `black`, not `none` — getting that wrong put
 `fill: rgb(0,0,0)` on every HTML element.
 
-### The facts block uses display shorthand, which is not CSS
+### The facts block uses real property names, not a shorthand
 
-The block reads `box=`, `radius=`, `font=`, `bg=`, `at=`, `inside=`, `style=`,
-`label=` for density. A 9B model read `box=12px 16px` as a declaration key and
-emitted `{"box":"12px 16px"}` in a preview block, which `validatePreviewBlock`
-rejected as `unknown-property` — discarding the valid declarations beside it. The
-system prompt now states that those tokens are labels and maps them to the real
-properties. The machine channel is guarded twice: by the prompt and by the
-sidecar.
+The head and tail segments are written with the names the CSS itself uses —
+`padding:12px 16px`, `border-radius:8px`, `color:#1f2937`, `font-weight:600` —
+so a fact and a declaration key are one vocabulary and nothing has to be decoded.
+
+The compact shorthand this replaced (`box=`, `radius=`, `font=`) cost twice,
+and the second failure is the one that decided it. A 9B model read
+`box=12px 16px` as a declaration key and emitted `{"box":"12px 16px"}` in a
+preview block, which `validatePreviewBlock` rejected as `unknown-property` —
+discarding the valid declarations beside it — and the system prompt grew a
+mapping rule to cover for that. With the mapping in place, a real run then showed
+the model quoting the shorthand straight back into its **visible** answer:
+`box=12px 16px`, `radius=8px`, which the person reading it cannot parse. That is
+the copy-paste-text complaint the prompt rewrite was meant to end, so the tokens
+went rather than the explanation. What the prompt keeps is the negative rule:
+never invent a token from a facts label, and never echo one into prose. The
+machine channel is still guarded twice — by the prompt and by the sidecar.
 
 ### Colours are normalized to sRGB before they leave the target
 
@@ -471,11 +628,18 @@ model prompt. Three independent gates:
    allowlist, not `hasExactKeys`: the Bridge omits every default, so the key set
    is a partial set by design. Unknown keys, wrong types, over-long values, a
    manipulated `geometry`, and a malformed ancestor chain are all rejected.
+   `derived` is validated by the same route: an unknown sub-key, an empty block, a
+   `truncated: false`, a `fontLoad` outside the two-word set, a `ratio` outside
+   1–21, a `background` that is not `#rrggbb`, or a `unmeasurable` marker with
+   anything riding along beside it all fail the message.
 3. **State** — `sanitizeStyleFacts` runs again in `citationFromRecord`, because
    `CitationSnapshot` is persisted on both user and assistant messages and would
    otherwise multiply across a session. A 1,200-char per-record budget drops
    whole groups (motion first, colour last) rather than truncating values: a
-   missing `filter` is honest, a half-written one is not.
+   missing `filter` is honest, a half-written one is not. `geometry` and `derived`
+   survive every one of those drops. `sanitizeDerived` keeps the same bargain for
+   the block: a contrast that does not survive is dropped whole rather than half
+   a verdict being kept.
 
 In the prompt the block is fenced as ```` ```untrusted-evidence ````, the system
 prompt names style values and element text as untrusted evidence explicitly, and
@@ -486,7 +650,10 @@ reference.
 
 `src/export/serialize.ts` is AI-free and its output is pasted into another tool
 by a human, with no untrusted-evidence framing. Style facts stay in the model
-transmission only; `serialize.test.ts` pins that.
+transmission only; `serialize.test.ts` pins that. The cited **source text** read
+for the proposal document and the details popup never goes the other way either:
+the export carries the `path:line` string the target reported, never the lines
+around it.
 
 ### Image policy and the `:cloud` gate
 
@@ -546,3 +713,220 @@ jsdom's `getComputedStyle` returns `''` for most longhands — `font-size`,
 test without an explicit per-property fixture passes while measuring nothing.
 Every such test stubs it, and the canvas stub deliberately ignores unparseable
 values the way a real `CanvasRenderingContext2D` does.
+
+The derived keys inherit the trap and add to it, because they read values no
+longhand fixture happens to cover: `color`, `font-size` and `font-weight` decide
+the contrast verdict, `background-image`, `background-color` and `opacity` decide
+the backdrop walk, `clientWidth`/`scrollWidth` decide the overflow check, and
+`document.fonts` decides the font-load one. A test that stubbed the longhands has
+stubbed none of these, and the honest result of a derived assertion against an
+unstubbed environment is an absent key rather than a wrong one.
+
+## 9f. Proposals, decisions and the change log
+
+The product is a preview-first editor. A model answer that carries a preview
+block is a **proposal**, and it is provisional until the user decides:
+
+| state        | meaning                                                        |
+| ------------ | -------------------------------------------------------------- |
+| `pending`    | applied to the target, undecided                                 |
+| `accepted`   | the user pressed Accept; the change stays applied                 |
+| `rejected`   | the user pressed Reject, **or** sent the next message undecided   |
+
+Sending the next message settles every pending proposal as rejected. That is the
+deliberate policy, not an oversight: accept/reject is opt-in, and moving on is
+itself a decision. A rollback only touches the page when it is a reject; accept
+is a no-op on the target because the change is already applied.
+
+`src/preview/proposal.ts` derives all of this from the session and formats the
+lines. It is pure — it never touches the bridge or mutates a session.
+
+### What a decision carries into the next turn
+
+The change log, never the answer text. Two earlier attempts were both wrong:
+
+- injecting the head of the answer fed the model a wall of measured CSS once
+  answers began quoting the evidence block;
+- injecting the `## 디자이너 전달문` section depended on an output format the
+  product no longer produces, and fell back to that same CSS dump.
+
+The preview transaction is the only durable source: it already holds what
+changed, on which component, and cannot drift from what was applied.
+
+```
+- [accept] PrimaryButton: padding 12px 16px, border-radius 10px
+- [reject] SecondaryButton: background-color #f5f5f5 — reverted
+```
+
+Rejected proposals stay in the list on purpose — that is what stops the model
+re-proposing a direction the user already turned down.
+
+### Settling before the prompt is built
+
+`settlePending()` writes the settled messages and transactions in one commit and
+**returns them**. The caller builds the next prompt from the return value. A
+session read after the commit is still the pre-commit value, so reading it would
+silently drop the decisions from the request that just made them.
+
+Rollback order is newest-first, because later transactions layer on top of
+earlier ones.
+
+A known limit: if a pending proposal was the basis of a later accepted one,
+rolling it back leaves that later change computed against a state that no longer
+exists. This is structural, not a bug to fix; it is documented rather than
+hidden.
+
+### The proposal document is deterministic
+
+`buildProposalDocument(session, snippets?)` renders the accepted change log into a
+handover document, and it is **not** written by the model. The document is meant
+to be executed by a person or an agent, so every value in it must be one that was
+measured and applied. A model-authored version could round a value, reorder a
+property, or describe a rejected change. Rejected directions are listed
+separately, and an unmeasured "before" is printed as `(측정 없음)` rather than
+filled with a plausible default.
+
+The optional second argument carries the cited source windows (§9h), read through
+the supervisor. The snippet is quoted verbatim and bounded, never summarized, and
+it is what separates "set the padding to 16px" from "set the padding to 16px, in
+the branch that renders the primary variant": the numbers above it are measured
+and applied, and these lines are where someone goes to do it.
+
+The change-log panel and the document render from the same `buildChangeLog()`
+output, so they cannot disagree.
+
+## 9g. Freeze is an inert state
+
+Freeze used to be a click block. `:hover` styling, hover handlers, Tab, typing,
+focus rings, animations and transitions all kept running, which made it read as
+"the page still works, minus a bit". It is now a real inert state:
+
+- **Pointer shield.** A `position: fixed; inset: 0` div inside the shadow host,
+  `pointer-events: auto` while frozen. The host is itself `pointer-events: none`
+  and only this child opts back in. The page stops receiving pointer events at
+  all, so `:hover` CSS, hover handlers, clicks, drags and context menus all stop.
+- **Hit testing by coordinate.** With the shield up, `e.target` retargets to the
+  host, so every hit would look like "the overlay". `onMouseMove` and `onClick`
+  resolve the real element with `document.elementsFromPoint`, dropping the
+  shield's `pointer-events` for the duration of the call. The event target is
+  kept as a fallback for environments without geometric hit-testing (jsdom).
+  Mouse-move hit tests are deferred into the existing rAF so the toggle costs at
+  most one forced reflow per frame.
+- **Keyboard and editing.** Window-capture blockers for `keydown`/`keyup`/
+  `keypress` (the Freeze shortcut and Escape excepted, so the user can get out)
+  and for `beforeinput`/`input`/`change`/`focusin`/`focusout`/`paste`/`cut`/
+  `drop`/`dragstart`. The active element is blurred when freeze arms.
+- **CSS stillness.** A document-level `style[data-vera-inspector="freeze-style"]`
+  pauses animations, drops transitions, hides the caret and disables smooth
+  scrolling. It lives outside the shadow root on purpose: the overlay must not be
+  affected by the page, and the page must be affected by this.
+- **Scrolling stays allowed.** It changes no app state and is the only way to
+  reach an off-screen component.
+
+What freeze does **not** stop: `setTimeout`/`setInterval`, `requestAnimationFrame`
+loops, sockets and video playback. Stopping those means patching globals, which
+can outlive the freeze and break the target page. True virtual time is a
+CDP-only capability. This limit is stated in the Bridge header rather than
+implied away.
+
+`detach()` removes the shield, the stylesheet and every blocker; a session reset
+and `destroy()` both go through it.
+
+### Verified against a real browser
+
+jsdom has no `elementsFromPoint`, so the unit tests can only prove that the
+capture phase blocks events and that the shield element toggles. Neither shows
+that a real browser stops the page from being hovered. `scripts/capture-probe-e2e.mjs`
+drives real `Input.dispatchMouseEvent` and `Input.dispatchKeyEvent` at a real
+frozen target and reports:
+
+```
+shield: {"shieldPointerEvents":"auto","hostPointerEvents":"none",
+         "elementUnderCursor":"DIV","hoverMatches":false}
+page saw keys: []
+```
+
+`hoverMatches: false` is the load-bearing assertion. The same run also shows the
+click retargeting to `DIV#` — the shield doing its job — while `activeCount`
+reaches 3, which is the proof that the coordinate hit test keeps selection
+working underneath it.
+
+## 9h. Source pointers (level 2)
+
+Level 1 is the `file:line` the Bridge reports from the target's own metadata
+(`data-inspector-file` / `data-inspector-line`). Level 2 is the text around it:
+saying *where* to edit is only half of being able to.
+
+### The location travels with the change log
+
+`ChangeLogEntry` and `ChangeLogGroup` in `src/preview/proposal.ts` now carry
+`file` and `line`, taken from the citation the change was applied to, and a group
+takes the first entry that has one rather than the first entry seen. Both are
+`null` when the target reported no location, because the Bridge never fabricates a
+location and neither does the log — an invented path would be worse than none.
+
+### Why the supervisor, and not the target's dev server
+
+`GET /api/target/source?path=&line=&before=&after=` is a read-only route on the
+Supervisor's existing status server (`scripts/with-launcher.mjs`), delegating to
+`readSourceWindow` / `handleSourceRequest` in `scripts/source-reader.mjs` and
+reusing the same origin gate and CORS helper as every other status route. Status
+codes: 403 for an unauthorized origin, with no CORS header; 400 for a missing
+path; 404 for every other refusal.
+
+The choice of host is the load-bearing part. `GET <target>/src/Button.tsx` against
+a Vite target answers with the **transformed** module, so the `file:line` already
+in hand would not line up with the returned text; the proxy emits no CORS
+headers, so the body would not even be readable; and the repository has no way to
+know whether the target is Vite at all. The Supervisor already knows the project
+root (`job.dir`) and already gates its routes to the active App origin, which is
+exactly the authority this needs.
+
+### Containment
+
+This is the project's **first** path-joining code, so it sets the convention
+rather than reusing one. The path arrives from the target page, which makes it
+untrusted input, and the file it names lives outside this repository. The rules,
+in order:
+
+- Relative and forward-slashed only. No `..`, no drive letter, no UNC prefix, no
+  leading slash, no control characters, and a length cap. A segment starting with
+  a dot is refused at any depth as well, which is what keeps a `.env` unreadable
+  through a route whose whole job is reading source.
+- The extension must be on a short allowlist of source files. This is not a
+  security boundary on its own — a `.ts` can hold anything — it keeps the route
+  from becoming a general file reader.
+- `node_modules` and `.git` are refused at **any** depth, because a monorepo puts
+  the first under every package and a `segments[0]` test would miss it.
+- Containment is re-checked after `realpathSync`. That is the check that actually
+  matters: a link inside the project is the obvious way to walk out of it.
+- A regular file, within a 512KB cap.
+
+The window is capped at 400 lines and **recentred** on the cited line when the cap
+bites. Keeping the start of the slice would produce a window that does not contain
+the line it was asked for, and a heading that lies is worse than a shorter quote.
+
+### What the app does with it
+
+`src/target/source.ts` fetches and sanitizes: every control character is stripped
+**except the tab**, so Korean, emoji and box-drawing characters survive intact and
+a tab is still indentation — and a newline cannot, because the host splits lines
+before sending, so one embedded newline would render as two lines while the
+heading counted one. `src/target/sourceCache.ts` holds a 12-entry LRU keyed
+`path:line` with in-flight de-duplication, and caches failures too: retrying a
+`no-path` on every render of a popup is a loop, and a target with no metadata will
+not grow one mid-session.
+
+The window surfaces in two places. The proposal document —
+`buildProposalDocument(session, snippets?)` — gains a `**참고 위치**` line and a
+fenced block of up to 40 lines; the details popup gains a `Source` block with line
+numbers. The document's fence is sized to one more than the longest backtick run
+inside the quote, because a source line containing ``` is a valid CommonMark
+closer and a bare three-backtick fence would end the block early, rendering the
+rest of the quote as prose. A quote cut at the 40-line cap says so in the document.
+
+A target that sets no `data-inspector-file` gets nothing, and no request is made
+at all — the empty path short-circuits before the fetch. The popup stays
+**silent** on every other failure too: no "unavailable" row, because the Location
+row above it is already the place that says where the component lives, and a row
+that repeats it is noise.

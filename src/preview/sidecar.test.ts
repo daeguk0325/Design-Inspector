@@ -277,6 +277,56 @@ describe('PreviewSidecarParser', () => {
     expect(run([body]).candidate).not.toBeNull();
   });
 
+  // Observed from the 9B model: with the exact tag in its context it wrote
+  // `design-insector-preview`, one letter short. The cost of not recognising
+  // that is not a lost preview, it is the JSON printed into the answer.
+  it('accepts an info string that is a near miss for ours, and hides the payload', () => {
+    for (const tag of [
+      'design-insector-preview',
+      'design-inspector-prevew',
+      'design-inspector_preview',
+      'design-inspector-previwe',
+    ]) {
+      const body = `${KOREAN_PREFIX}\n\`\`\`${tag}\n${VALID_BLOCK}\n\`\`\`\n`;
+      const { text, candidate } = run([body]);
+      expect(candidate, tag).not.toBeNull();
+      expect(text, tag).toBe(`${KOREAN_PREFIX}\n`);
+    }
+  });
+
+  it('counts a near-miss block so the slip is visible rather than silent', () => {
+    const parser = new PreviewSidecarParser();
+    parser.push(`${KOREAN_PREFIX}\n\`\`\`design-insector-preview\n${VALID_BLOCK}\n\`\`\`\n`);
+    parser.flush();
+    expect(parser.stats.blocksNearMiss).toBe(1);
+    expect(parser.stats.blocksStripped).toBe(1);
+    expect(parser.stats.blocksInvalid).toBe(0);
+  });
+
+  it('does not count the exact tag as a near miss', () => {
+    const parser = new PreviewSidecarParser();
+    parser.push(`${KOREAN_PREFIX}\n\`\`\`design-inspector-preview\n${VALID_BLOCK}\n\`\`\`\n`);
+    parser.flush();
+    expect(parser.stats.blocksNearMiss).toBe(0);
+  });
+
+  it('refuses a near-miss block whose payload does not validate', () => {
+    // The tolerance is only about recognising the fence. Everything downstream
+    // of that is unchanged, so a near-miss cannot smuggle anything past the
+    // validator that the exact tag could not.
+    const body = `${KOREAN_PREFIX}\n\`\`\`design-insector-preview\n{"version":1,"rules":[{"target":1,"declarations":{"position":"fixed"}}]}\n\`\`\`\n`;
+    const { text, candidate } = run([body]);
+    expect(candidate).toBeNull();
+    expect(text).toBe(`${KOREAN_PREFIX}\n`);
+  });
+
+  it('keeps a far-off tag as prose, and an unfenced payload as text', () => {
+    const far = `${KOREAN_PREFIX}\n\`\`\`design-inspector-preview-note\n${VALID_BLOCK}\n\`\`\`\n`;
+    expect(run([far]).text).toBe(far);
+    const unfenced = `${KOREAN_PREFIX}\n${VALID_BLOCK}\n`;
+    expect(run([unfenced]).text).toBe(unfenced);
+  });
+
   it('ignores empty pushes and pushes after flush', () => {
     const parser = createPreviewSidecarParser();
     expect(parser.push('')).toEqual({ text: '', candidate: null });

@@ -15,12 +15,15 @@
 
 import type { InspectorSession } from '../state/models.ts';
 import { latestUserRequest } from '../state/models.ts';
+import type { SourceSnippet } from '../target/source.ts';
 import type { ChangeLogGroup, Proposal } from './proposal.ts';
 import { changeLogGroupsForSession, proposalsIn } from './proposal.ts';
 
 export const PROPOSAL_DOCUMENT_TITLE = 'UI 수정 제안서';
 const LINE_ENDING = '\n';
 const MAX_COMPONENT_CHARS = 120;
+/** A snippet is context, not the deliverable: past this it is a file dump. */
+const MAX_SNIPPET_LINES = 40;
 
 function sanitize(value: string, max: number): string {
   const flat = value.replace(/\s+/g, ' ').trim();
@@ -42,6 +45,41 @@ function groupSection(group: ChangeLogGroup): string[] {
   return out;
 }
 
+/**
+ * The source the change belongs to, when the target reported a location and
+ * the file could be read.
+ *
+ * This is the difference between "set the padding to 16px" and "set the padding
+ * to 16px, in the branch that renders the primary variant". The numbers above
+ * are measured and applied; these lines are where a person or an agent goes to
+ * do it.
+ *
+ * The fence is sized to the longest backtick run inside the quoted text. A
+ * three-backtick fence is *not* enough: a source line containing ``` is a valid
+ * CommonMark closer, so it would end the block early and the rest of the quote
+ * would render as prose. Sizing the fence is the only fix that survives a
+ * renderer.
+ */
+function sourceSection(snippet: SourceSnippet | undefined): string[] {
+  if (snippet === undefined) return [];
+  const all = snippet.lines;
+  if (all.length === 0) return [];
+  const shown = all.slice(0, MAX_SNIPPET_LINES);
+  const longestRun = shown.reduce((longest, line) => {
+    const runs = line.match(/`+/g);
+    return Math.max(longest, runs?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0);
+  }, 2);
+  const fence = '`'.repeat(Math.max(3, longestRun + 1));
+  const out: string[] = ['', `**참고 위치** \`${snippet.path}:${snippet.startLine}\``, ''];
+  out.push(`${fence}tsx`);
+  for (const line of shown) out.push(line);
+  out.push(fence, '');
+  if (all.length > shown.length) {
+    out.push(`_위 인용은 ${shown.length}줄까지이며, 전체 ${snippet.totalLines}줄 중 일부입니다._`, '');
+  }
+  return out;
+}
+
 export interface ProposalDocument {
   title: string;
   markdown: string;
@@ -51,7 +89,10 @@ export interface ProposalDocument {
   rejectedCount: number;
 }
 
-export function buildProposalDocument(session: InspectorSession | null): ProposalDocument {
+export function buildProposalDocument(
+  session: InspectorSession | null,
+  snippets?: ReadonlyMap<string, SourceSnippet>,
+): ProposalDocument {
   const groups = changeLogGroupsForSession(session);
   const proposals = proposalsIn(session?.messages ?? [], session?.previewTransactions ?? []);
   const rejected = proposals.filter((proposal) => proposal.state === 'rejected');
@@ -71,7 +112,10 @@ export function buildProposalDocument(session: InspectorSession | null): Proposa
       '아래 값은 검수 시점에 실제로 측정된 값이며, 미리보기에서 실제 적용된 값입니다.',
       '',
     );
-    for (const group of groups) out.push(...groupSection(group));
+    for (const group of groups) {
+      out.push(...groupSection(group));
+      out.push(...sourceSection(snippetFor(group, snippets)));
+    }
   }
 
   if (rejected.length > 0) {
@@ -94,6 +138,17 @@ export function buildProposalDocument(session: InspectorSession | null): Proposa
     changeCount,
     rejectedCount: rejected.length,
   };
+}
+
+function snippetFor(
+  group: ChangeLogGroup,
+  snippets: ReadonlyMap<string, SourceSnippet> | undefined,
+): SourceSnippet | undefined {
+  if (snippets === undefined || group.file === null) return undefined;
+  // Trimmed on this side too: the cache key is built from a trimmed path, and
+  // the wire validator accepts an untrimmed bounded string, so an untrimmed
+  // `file` would fetch successfully and then never attach.
+  return snippets.get(`${group.file.trim()}:${group.line ?? 0}`);
 }
 
 function summaryFor(proposal: Proposal): string[] {

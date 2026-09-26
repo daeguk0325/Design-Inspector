@@ -106,6 +106,7 @@ export const STYLE_FACT_ALLOWED_KEYS: ReadonlySet<string> = new Set([
   'label',
   'ancestors',
   'tagName',
+  'derived',
 ]);
 
 const PROP_GROUP: ReadonlyMap<string, StyleFactGroup> = new Map(

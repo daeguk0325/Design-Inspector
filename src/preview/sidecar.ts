@@ -11,10 +11,57 @@ export interface PreviewSidecarStats {
   blocksInvalid: number;
   blocksOversized: number;
   blocksUnterminated: number;
+  /** Opened through a misspelled info string. See NEAR_MISS_MAX_EDITS. */
+  blocksNearMiss: number;
 }
 
 const OPENING_FENCE_RE = new RegExp('^`{3}' + PREVIEW_BLOCK_LANGUAGE + '[ \\t]*$', 'i');
 const CLOSING_FENCE_RE = /^`{3,}[ \t]*$/;
+const FENCE_INFO_RE = /^`{3,}([A-Za-z0-9][A-Za-z0-9 _-]*)[ \t]*$/;
+
+/**
+ * How wrong an info string may be and still count as an attempt at ours.
+ *
+ * Observed from a 9B model that had the exact tag in its context and wrote
+ * `design-insector-preview` — one missing letter. Without a tolerance the
+ * consequence is not a lost preview, it is the JSON payload printed into the
+ * answer as visible text, because nothing recognises the fence. Two edits is
+ * the bound: near enough to be a slip of the same token, far enough that
+ * `design-inspector-preview-note` (5 edits) still stays ordinary prose, which
+ * an existing test pins.
+ *
+ * What this deliberately does not fix: a partially streamed near-miss tag can
+ * flash for a frame or two before the newline completes the line, because the
+ * streaming guard only hides prefixes of the correct tag. Hiding every
+ * unrecognised fence would mean hiding the user's code blocks too, and the
+ * payload leaking is the part that has to be prevented.
+ */
+const NEAR_MISS_MAX_EDITS = 2;
+
+/** Levenshtein, abandoned as soon as it exceeds `cap`. */
+function editDistanceWithin(a: string, b: string, cap: number): boolean {
+  if (Math.abs(a.length - b.length) > cap) return false;
+  let previous = Array.from({ length: b.length + 1 }, (_unused, index) => index);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      const value = Math.min((current[j - 1] ?? 0) + 1, (previous[j] ?? 0) + 1, (previous[j - 1] ?? 0) + cost);
+      current.push(value);
+      if (value < rowMin) rowMin = value;
+    }
+    if (rowMin > cap) return false;
+    previous = current;
+  }
+  return (previous[b.length] ?? cap + 1) <= cap;
+}
+
+function isNearMissInfo(info: string): boolean {
+  const text = info.trim().toLowerCase();
+  if (text.length === 0) return false;
+  return editDistanceWithin(text, PREVIEW_BLOCK_LANGUAGE, NEAR_MISS_MAX_EDITS);
+}
 
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -37,6 +84,7 @@ export class PreviewSidecarParser {
   private blockLines: string[] = [];
   private blockChars = 0;
   private blockOversized = false;
+  private blockNearMiss = false;
   private pendingBlock: string | null = null;
   private committed: PreviewCandidate | null = null;
   private finished = false;
@@ -44,6 +92,7 @@ export class PreviewSidecarParser {
   private invalid = 0;
   private oversized = 0;
   private unterminated = 0;
+  private nearMiss = 0;
 
   constructor(context: PreviewValidationContext = {}) {
     this.context = context;
@@ -63,6 +112,7 @@ export class PreviewSidecarParser {
       blocksInvalid: this.invalid,
       blocksOversized: this.oversized,
       blocksUnterminated: this.unterminated,
+      blocksNearMiss: this.nearMiss,
     };
   }
 
@@ -132,7 +182,14 @@ export class PreviewSidecarParser {
     }
     if (OPENING_FENCE_RE.test(line)) {
       this.pendingBlock = null;
-      this.openBlock();
+      this.openBlock(false);
+      this.emittedLength = 0;
+      return '';
+    }
+    const nearMiss = FENCE_INFO_RE.exec(line);
+    if (nearMiss !== null && isNearMissInfo(nearMiss[1] ?? '')) {
+      this.pendingBlock = null;
+      this.openBlock(true);
       this.emittedLength = 0;
       return '';
     }
@@ -142,11 +199,12 @@ export class PreviewSidecarParser {
     return withNewline ? `${fresh}\n` : fresh;
   }
 
-  private openBlock(): void {
+  private openBlock(nearMiss: boolean): void {
     this.insideBlock = true;
     this.blockLines = [];
     this.blockChars = 0;
     this.blockOversized = false;
+    this.blockNearMiss = nearMiss;
   }
 
   private appendBlockLine(line: string): void {
@@ -166,13 +224,16 @@ export class PreviewSidecarParser {
     this.blockLines = [];
     this.blockChars = 0;
     this.blockOversized = false;
+    this.blockNearMiss = false;
   }
 
   private closeBlock(): void {
     const oversized = this.blockOversized;
+    const nearMiss = this.blockNearMiss;
     const raw = this.blockLines.join('\n');
     this.discardBlock();
     this.stripped += 1;
+    if (nearMiss) this.nearMiss += 1;
     if (oversized) return;
     if (isWhitespaceOnly(raw)) {
       this.invalid += 1;

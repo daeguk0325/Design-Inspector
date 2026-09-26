@@ -511,3 +511,260 @@ full repository currently passes 626 tests across 37 files.
     on every read and drops the transpiled artifact cache when it moves. This was
     a developer-experience trap rather than a product defect: a stale proxy
     silently served an older Bridge.
+
+## Live 9B verification of the §9f prompt (§9f, 2026-09-26)
+
+- Model: `hf.co/TaichuAI/ZDTaichu5.0-9B-GGUF:Q8_0` (capabilities include
+  `thinking`), `temperature: 0`, `num_predict: 12000`
+- Harness: `scripts/capture-probe-e2e.mjs`, arms G/H/I over the **real** facts,
+  the real contact sheet and the real crops, scored mechanically by `report()`
+  in the same script. `--report-only` re-scores the saved answers, so the
+  evaluation never depends on my reading of them.
+- Run: `--run`, then repeated 3 more times. **4 samples per arm.** A single sample
+  is not a measurement here: this is a thinking model, so at `temperature: 0`
+  the thinking path is still sampled and the visible answer varies run to run.
+
+The "Expected" column below is what I *assumed*, not what the product requires.
+Arm G's request was "이 버튼의 색상 대비가 충분한지 확인하고, 스페이싱을
+정리해줘." — it contains 정리해줘, an explicit change instruction, so all four
+of its "failures" were my expectation being wrong, not the model. Do not read
+that row as evidence of anything except a bad test.
+
+| Arm | Request | Assumed | 1 | 2 | 3 | 4 |
+| --- | --- | --- | --- | --- | --- | --- |
+| G | "…확인하고, 스페이싱을 정리해줘" (contains a change instruction) | words, no block | n/a | n/a | n/a | n/a |
+| H | "체크아웃 버튼이랑 취소 버튼 사이 간격을 16px로 늘려줘" | valid block | pass | pass | fail | pass |
+| I | "지금 확인한 문제를 디자이너에게 전달해줘" | Korean handoff prose, no block | fail | fail | fail | fail |
+
+### What the run fixed
+
+**The facts display shorthand leaked into the visible answer.** With the facts
+written as `box=12px 16px`, `radius=8px`, `font=700 20px/31px Pretendard`, the
+model quoted those tokens straight back in its prose — unreadable to the person
+the answer is for, and the copy-paste-text complaint the prompt rewrite was
+supposed to end. It had already cost once before, as `box` being read as a
+preview declaration key. `factsLines` now emits real property names
+(`padding:`, `border-radius:`, `background-color:`, and the font longhands
+individually), which makes a fact and a declaration the same vocabulary. The
+mapping rule in the system prompt had nothing left to map and was deleted.
+Across all 12 samples, no fact label survives into the prose.
+
+**A direct change request produced no preview at all, and leaked raw JSON.**
+The first arm-H run answered 0 characters: a thinking-capable model spent the
+whole `num_predict` budget on `message.thinking`. That was a harness bug, not a
+model one — the app sends no `num_predict` and ignores `thinking` when
+streaming, so it was never exposed. Fixed in the harness.
+
+The next run then answered with a ```css block containing the raw selector
+`main`, followed by a `design-inspector-preview` fence whose opening backticks
+were missing. `PreviewSidecarParser` only enters block mode on a matching opening
+fence, so it never suppressed anything and **the machine JSON was shown to the
+user as prose** — the worst failure shape available. The JSON itself was valid
+and used `gap`, which the allowlist change had just made legal; only the fence
+discipline failed. The system prompt now requires three backticks on the fence
+line, states that the block must be the only fenced code block in the response,
+and says to show CSS inline instead of in a second fence. Arm H is now 3/4.
+
+**gap works.** The allowlist addition is what arm H was built to test, and every
+passing run emits a `gap` declaration the validator accepts. Before it, the same
+request produced `forbidden-property gap` and the whole proposal was discarded.
+
+### The "12/12" result was a broken experiment, and the conclusion drawn from it was wrong
+
+Arms G and I scored 4/4 "preview block on a non-change request", and the first
+version of this section called that a model-capability limit at 9B. **That
+conclusion was not supported.** The A/B varied the request wording and the
+presence of facts at the same time, so every result was confounded and a failure
+could not be attributed.
+
+`scripts/block-pressure.mjs` was written to separate them: the request is held
+fixed and only the facts move.
+
+| Case | Request | Facts | Expected | Result |
+| --- | --- | --- | --- | --- |
+| 1 | handoff ("전달해줘") | absent | no block | pass |
+| 2 | handoff ("전달해줘") | present | no block | pass |
+| 3 | change ("모서리를 4px로 줄여줘") | present | block | pass |
+
+3/3, same model, same prompt. The model does follow the rule; the A/B arms were
+asking questions that a reader can reasonably hear as a change request. Arm G's
+"패딩 개선점 알려줘" is exactly that, and in a preview-first tool resolving it
+toward "here is the change" is a defensible reading rather than a failure.
+
+**The invented-colour check was also measuring the wrong thing.** It flagged
+`rgb(255, 255, 255)` and `#333333` as fabrications, but a *proposed* new value
+is this product's purpose; what the §9e evidence rules forbid is *asserting* a
+measurement that was never taken. The check conflated the two, and its first
+version could not see the failure mode at all because it looked for hex while
+the collector writes `rgb()`. It was fixed for correctness and then narrowed:
+a proposal is not a fabrication.
+
+So there is no residual model-capability defect to report. What the run actually
+shows is that the two prompt changes are real and reproducible — the shorthand
+leak is gone from 12/12 samples, and a direct change request now yields a
+validator-accepted block 3/4 — and that an A/B over a thinking model needs
+n>1 and a held-fixed control before it is allowed to conclude anything.
+
+**The delivery section stayed opt-in.** No sample that was not asked for a
+handoff produced one, and the three that were asked for produced Korean prose
+rather than a fixed template — the §9f format rules hold. The one arm-I sample
+that scored a miss had drifted into English and lost the handoff framing; the
+Korean-only rule was moved to the first line of the prompt as a result.
+### Independent replication: 3 subagents, 26 observations (2026-09-26)
+
+The block-pressure result above was n=1 per case — the same flaw this report
+criticises. Three subagents ran in parallel against the same local model and
+prompt, with no shared state between them:
+
+- **Agent 1 — exact replication** (`scripts/block-pressure.mjs --run`, 3 full
+  repeats): 9/9 pass. Outputs were byte-identical across repeats, and identical
+  to the original run. At temperature 0 this model is deterministic for these
+  inputs, which means the earlier run-to-run variance came from the thinking
+  path on longer answers, not from these cases.
+- **Agent 2 — new wording** (own script, same structure): handoff variants
+  ("이 내용을 개발자에게 공유해줘.", "버튼 문제를 개발팀에 전달해줘.") with and
+  without facts → no block, 6/6; a new change request ("버튼 간격을 8px로
+  줄여줘.") → a well-formed, validator-accepted block, 3/3. One note: the
+  model satisfied the spacing request with `padding: 8px 8px`, not `gap` —
+  valid under the policy, accepted, and arguably the better-targeted choice
+  since the citation is the button itself rather than its container.
+- **Agent 3 — boundary mapping** (4 probes × 2 repeats, no pre-registered
+  expectation for the ambiguous two): "이 버튼 어때?" → no block 2/2.
+  "간격을 16px로 하는 게 좋을까?" → no block 2/2. "패딩 개선점 알려줘." in
+  isolation → no block 2/2, which retires the A/B's reading of that phrasing:
+  the A/B request additionally contained an explicit change instruction.
+  "WCAG AA를 통과하는지 알려줘. 바꾸지 마." → a block 2/2.
+
+The boundary run also surfaced two genuine prose defects that are not protocol
+failures: one answer labelled `rgb(30, 30, 30)` — a near-black — as white text,
+and the do-not-change answers asserted a computed contrast ratio (4.80:1 in one
+run, 3.2:1 in the next) that is derived, not measured. A number that moves
+between runs is not a measurement, and the prompt's "never name a value you
+were not given" already covers it; the ratio is what happens when the model
+reasons its way around that rule instead of saying 확인 불가.
+
+### The explicit do-not-change rule failed, and the failure is informative
+
+"바꾸지 마 / 건드리지 마 / 그대로 둬 → emit no block even if you notice
+something worth changing" was added to the prompt and the boundary probe was
+re-run (2/2). The model still emitted both times. But look at what it emitted:
+
+```
+```design-insector-preview
+{"version":1,"rules":[{"target":1,"declarations":{"font-size":"14px","font-weight":"600"}}]}
+```
+```
+
+Two things. First, the info string is misspelled — *insector*, not *inspector* —
+so `PreviewSidecarParser` never enters block mode and the JSON sits in the
+answer as visible text. That is the leak shape again, not a silent restyle, and
+it is why the boundary script's own detector reported "emitted=false" while the
+text plainly shows a fence. A detector that matches only the correct spelling
+cannot see a misspelled fence; that gap is now documented here rather than
+fixed, because the second thing matters more: the declarations restate the
+already-current values (`font-size: 14px`, `font-weight: 600`). Even had the
+fence matched, applying it would have changed nothing on the page.
+
+So the residual is narrow and precisely stated: on an explicit do-not-change
+with measured facts in context, this model still reaches for the block 4/4, but
+what it reaches for is a restatement, and when the fence is exact the §9f gate
+— a pending proposal the user did not ask for, rejected with one click or by
+sending the next message — is the whole cost. No further prompt iteration is
+planned for this; two attempts moved nothing and the passing 24 observations
+are not worth risking for it.
+## Derived measurements: the 9B quotes the verdict instead of inventing one
+
+The reason the contrast ratio moved into the Bridge is on the record above: the
+same two colours came back as 4.80:1 in one run and 3.2:1 in the next. So the
+question this section answers is narrow and behavioural: **when a real WCAG
+verdict is sitting in the facts, does the model repeat it?**
+
+Measured in a real Chrome against the probe page, via
+`scripts/capture-probe-e2e.mjs --run`:
+
+| Element | Text on | Ratio | Min | Verdict |
+| --- | --- | --- | --- | --- |
+| `checkout-cta` | #1e1e1e on #3884ff | 4.69:1 | 4.5 | pass |
+| `checkout-cancel` | #3884ff on #ffffff (walked past `transparent`) | 3.55:1 | 4.5 | **fail** |
+| stat line | #0f9d58 on #f0fdf4, 20px/700 | 3.35:1 | **3** | pass |
+
+The third row is the one worth reading twice. It is large text, so its minimum
+is 3, not 4.5 — and the model reported it that way, in the same answer where it
+reported the other two as failures or passes at 4.5. It did not recompute a
+single ratio. Across two full runs and every arm that discussed contrast
+(4.69 / 3.55 / 3.35, with 4.5 / 4.5 / 3), the figures were verbatim and correct
+every time.
+
+That also caught a real defect in the measurement itself. `getComputedStyle`
+answers `24px`, not `24`, and the first version of the parser read every real
+font size as zero — so the large-text branch could never fire in a browser and a
+20px/700 heading would have been reported as a 4.5 failure. The jsdom fixtures
+had passed, because they fed unitless sizes. Only the real page exposed it.
+
+### Three findings from the same two runs
+
+**1. With images attached, the block decision is not deterministic.** Arm G ends
+in `정리해줘`, a change instruction. Run 1 it emitted a valid block; run 2 it
+emitted none. This qualifies the earlier "byte-identical across repeats" result
+in this report: that was measured on facts-only prompts via
+`scripts/block-pressure.mjs`, and it holds there. Once a contact sheet and crops
+are attached, the same model varies run to run. The §9f gate is what absorbs
+this — an unwanted proposal is a pending card the user rejects with one click —
+but the variation is real and should not be described as stability.
+
+**2. The 9B can loop in the thinking channel and return nothing.** Arm H once
+produced a 0-byte answer. Its thinking trace is 17,285 characters in which one
+reasoning paragraph repeats 26 times before the budget runs out. The scorer now
+reports this as `EMPTY ANSWER (thinking-channel repetition loop suspected)`
+rather than as a missing preview block, because it is a different failure and
+conflating them hides it. Worth noting for anyone tuning the model: the app
+sends no `num_predict`, so in production this loop runs to the context limit
+instead of truncating — the visible symptom would be a very long answer, not an
+empty one. The honest options are to cap thinking, to detect repetition, or to
+accept it; none of them were in scope here.
+
+**3. The mechanical scorer was wrong about a colour, in the same way the A/B
+was.** It scored every colour in an answer as "invented", including colours
+inside a preview block. Arm G proposes a white background for a button that
+fails AA — that is the answer working, now that the prompt permits a concrete
+proposed value. The check now runs on prose only, and arm G is scored by what
+its request actually asks for.
+
+### Not fixed, on purpose
+
+- **Block timing on a non-change request.** Arm I (an explicit handoff request)
+  still emitted a block, in one of two runs. Content was defensible — it had just
+  observed 3.55:1 against a 4.5 minimum and proposed darkening the text — but
+  the request was not a change request. This is the same residual as the `b4`
+  case above, and it now has a second independent symptom. The gate is unchanged.
+- **`box-shadow` and overlapping siblings are not part of a contrast ratio.** The
+  backdrop walk resolves flat colours only, and reports `unmeasurable` when an
+  image, gradient or reduced opacity is in the way. A shadow darkening the text
+  is not accounted for, and the ratio would be optimistic.
+- **Responsive behaviour is out of scope for both channels.** One viewport and
+  one screenshot cannot answer it; the prompt says so.
+
+## Source pointers: why not the target's dev server
+
+The obvious way to show the code behind a component is to fetch it from the
+target. It does not work, and the reason is worth writing down because it looks
+like it should:
+
+- For a Vite target, `GET <target>/src/Button.tsx` answers with the
+  **transformed** module. The `file:line` already in hand would then point at
+  the wrong line of the returned text, which is worse than showing nothing.
+- `?raw` is an import-time transform, so a bare `?raw` URL returns a JavaScript
+  module wrapping the string, not the string.
+- The proxy emits no CORS headers at all, so the browser would hand the app an
+  opaque response it cannot read.
+- Nothing in the repo knows whether the target is Vite, and the design is
+  deliberately framework-neutral.
+
+The supervisor already knows the project root (`job.dir`), already gates its
+routes to the active app origin, and already answers CORS. So
+`GET /api/target/source` lives there, and `scripts/source-reader.mjs` holds the
+containment rules — including the one that matters most, re-checking
+containment *after* `realpathSync`, because a symlink inside a project is the
+obvious way to read a file outside it. A target with no `data-inspector-file`
+gets no request at all, and the details popup stays silent on any failure rather
+than growing an "unavailable" row.

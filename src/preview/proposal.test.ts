@@ -239,14 +239,48 @@ describe('change log', () => {
         messageId: 'a-1',
         transactionId: 'tx-1',
         order: 1,
-        component: 'PrimaryButton',
-        elementKey: 'html:testid:card',
-        property: 'padding',
-        before: '4px',
-        after: '12px',
-      },
-    ]);
-  });
+          component: 'PrimaryButton',
+          elementKey: 'html:testid:card',
+          file: 'src/Button.tsx',
+          line: 10,
+          property: 'padding',
+          before: '4px',
+          after: '12px',
+        },
+      ]);
+    });
+
+    it('carries the source location the target reported, so the document can say where to edit', () => {
+      const cited = {
+        ...assistant().citations[0]!,
+        file: 'src/components/Button.tsx',
+        line: 42,
+      };
+      const s = session({
+        messages: [
+          user(),
+          { ...assistant({ decision: 'accepted' }), citations: [cited] },
+        ],
+      });
+      const [entry] = buildChangeLog(s.messages, s.previewTransactions);
+      expect(entry).toMatchObject({ file: 'src/components/Button.tsx', line: 42 });
+      const [group] = groupChangeLog(s.messages, s.previewTransactions);
+      expect(group).toMatchObject({ file: 'src/components/Button.tsx', line: 42 });
+    });
+
+    it('leaves the location null when the target reported none', () => {
+      const bare = {
+        ...assistant().citations[0]!,
+        file: null,
+        line: null,
+      };
+      const s = session({
+        messages: [{ ...assistant({ decision: 'accepted' }), citations: [bare] }],
+      });
+      const [group] = groupChangeLog(s.messages, s.previewTransactions);
+      expect(group?.file).toBeNull();
+      expect(group?.line).toBeNull();
+    });
 
   it('leaves an unmeasured before value null rather than guessing', () => {
     const s = session({

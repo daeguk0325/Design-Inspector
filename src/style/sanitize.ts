@@ -14,7 +14,7 @@ import {
   styleFactGroup,
 } from './properties.ts';
 import type { StyleFactGroup } from './properties.ts';
-import type { StyleFacts } from '../protocol/types.ts';
+import type { StyleFacts, StyleFactsDerived } from '../protocol/types.ts';
 
 export const STYLE_FACT_VALUE_CHARS = 120;
 export const STYLE_FACT_LABEL_CHARS = 80;
@@ -33,6 +33,10 @@ const ANCESTOR_SEGMENT = /^[a-z][a-z0-9-]{0,31}(?:\.[A-Za-z][A-Za-z0-9_-]{0,63})
 const ZERO_LENGTH = /^0(?:\.0+)?(?:px|em|rem|%|pt|ch|vh|vw|vmin|vmax)?$/;
 const SIDES = ['top', 'right', 'bottom', 'left'] as const;
 const GEOMETRY_KEYS = ['x', 'y', 'width', 'height'] as const;
+const CONTRAST_KEYS = ['ratio', 'min', 'pass', 'large', 'background'] as const;
+const DERIVED_KEYS = ['contrast', 'truncated', 'fontLoad'] as const;
+const FONT_LOAD_VALUES: ReadonlySet<string> = new Set(['fallback', 'unknown']);
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
 function clean(value: string, max: number): string | null {
   const cleaned = value.replace(CONTROL_CHARS, ' ').replace(WHITESPACE, ' ').trim();
@@ -77,6 +81,57 @@ function sanitizeGeometry(value: unknown): StyleFacts['geometry'] {
   }
   if (out.width < 0 || out.height < 0) return undefined;
   return out;
+}
+
+function sanitizeContrast(value: unknown): StyleFactsDerived['contrast'] {
+  if (!isRecord(value)) return undefined;
+  if (value['unmeasurable'] !== undefined) {
+    if (value['unmeasurable'] !== true) return undefined;
+    if (Object.keys(value).length !== 1) return undefined;
+    return { unmeasurable: true };
+  }
+  for (const key of Object.keys(value)) {
+    if (!CONTRAST_KEYS.includes(key as (typeof CONTRAST_KEYS)[number])) return undefined;
+  }
+  if (Object.keys(value).length !== CONTRAST_KEYS.length) return undefined;
+  const ratio = value['ratio'];
+  const min = value['min'];
+  const background = value['background'];
+  if (typeof ratio !== 'number' || !Number.isFinite(ratio) || ratio < 1 || ratio > 21) return undefined;
+  if (typeof min !== 'number' || !Number.isFinite(min) || min < 1 || min > 21) return undefined;
+  if (typeof value['pass'] !== 'boolean' || typeof value['large'] !== 'boolean') return undefined;
+  if (typeof background !== 'string' || !HEX_COLOR.test(background)) return undefined;
+  return {
+    ratio: Math.round(ratio * 100) / 100,
+    min: Math.round(min * 10) / 10,
+    pass: value['pass'],
+    large: value['large'],
+    background: background.toLowerCase(),
+  };
+}
+
+/**
+ * A derived block that does not survive is dropped whole, and the record keeps
+ * whatever else it had — the same bargain `props` makes. What must never happen
+ * is half a verdict surviving, which is why `contrast` is all-or-nothing even
+ * when a sibling like `truncated` is fine.
+ */
+function sanitizeDerived(value: unknown): StyleFactsDerived | undefined {
+  if (!isRecord(value)) return undefined;
+  for (const key of Object.keys(value)) {
+    if (!DERIVED_KEYS.includes(key as (typeof DERIVED_KEYS)[number])) return undefined;
+  }
+  const out: StyleFactsDerived = {};
+  const contrast = sanitizeContrast(value['contrast']);
+  if (contrast !== undefined) out.contrast = contrast;
+  // `false` is the unremarkable state and is not stored, exactly like a
+  // default-valued property: the field's absence is the "it fits" answer.
+  if (value['truncated'] === true) out.truncated = true;
+  const fontLoad = value['fontLoad'];
+  if (typeof fontLoad === 'string' && FONT_LOAD_VALUES.has(fontLoad)) {
+    out.fontLoad = fontLoad as NonNullable<StyleFactsDerived['fontLoad']>;
+  }
+  return Object.keys(out).length === 0 ? undefined : out;
 }
 
 function sanitizeAncestors(value: unknown): string[] | undefined {
@@ -134,7 +189,11 @@ function fitStorageBudget(facts: StyleFacts): StyleFacts {
     const candidate = dropGroups(facts, dropped);
     if (storedSize(candidate) <= STYLE_FACT_RECORD_CHARS) return candidate;
   }
-  return { props: {}, ...(facts.geometry === undefined ? {} : { geometry: facts.geometry }) };
+  return {
+    props: {},
+    ...(facts.geometry === undefined ? {} : { geometry: facts.geometry }),
+    ...(facts.derived === undefined ? {} : { derived: facts.derived }),
+  };
 }
 
 export function sanitizeStyleFacts(value: unknown): StyleFacts | undefined {
@@ -156,12 +215,14 @@ export function sanitizeStyleFacts(value: unknown): StyleFacts | undefined {
     if (typeof value['tagName'] !== 'string' || !TAG_NAME.test(value['tagName'])) return undefined;
     tagName = value['tagName'];
   }
+  const derived = sanitizeDerived(value['derived']);
   const empty =
     Object.keys(props).length === 0 &&
     geometry === undefined &&
     label === undefined &&
     ancestors === undefined &&
-    tagName === undefined;
+    tagName === undefined &&
+    derived === undefined;
   if (empty) return undefined;
   return fitStorageBudget({
     props,
@@ -169,6 +230,7 @@ export function sanitizeStyleFacts(value: unknown): StyleFacts | undefined {
     ...(label === undefined ? {} : { label }),
     ...(ancestors === undefined ? {} : { ancestors }),
     ...(tagName === undefined ? {} : { tagName }),
+    ...(derived === undefined ? {} : { derived }),
   });
 }
 
@@ -232,6 +294,8 @@ function factsLines(facts: StyleFacts): string[] {
   if (background !== undefined) head.push(`background-color:${background}`);
   const font = fontLonghands(props);
   if (font !== null) tail.push(font);
+  const derivedLine = derivedLineOf(facts.derived);
+  if (derivedLine !== null) tail.push(derivedLine);
   if (facts.label !== undefined) tail.push(`label="${facts.label}"`);
   if (facts.geometry !== undefined) {
     const { x, y, width, height } = facts.geometry;
@@ -249,6 +313,28 @@ function factsLines(facts: StyleFacts): string[] {
   const lines = [head.join('  '), tail.join('  ')].filter((line) => line.length > 0);
   if (rest.length > 0) lines.push(`style=${rest.join(', ')}`);
   return lines;
+}
+
+/**
+ * The derived measurements, as one segment. Wording matters here: `contrast`
+ * is not a CSS property, but the model has already once answered with a
+ * declaration named after a facts token, so the tokens stay prose-shaped and
+ * the verdict is stated rather than left to be recomputed from the ratio.
+ */
+function derivedLineOf(derived: StyleFactsDerived | undefined): string | null {
+  if (derived === undefined) return null;
+  const parts: string[] = [];
+  const contrast = derived.contrast;
+  if (contrast !== undefined) {
+    if ('unmeasurable' in contrast) {
+      parts.push('contrast unmeasurable');
+    } else {
+      parts.push(`contrast ${contrast.ratio}:1 min ${contrast.min} ${contrast.pass ? 'pass' : 'fail'}`);
+    }
+  }
+  if (derived.truncated === true) parts.push('text-truncated');
+  if (derived.fontLoad !== undefined) parts.push(`font-load ${derived.fontLoad}`);
+  return parts.length === 0 ? null : parts.join(' ');
 }
 
 function blockLines(facts: StyleFacts, marker: string, header: string): string[] {
@@ -286,6 +372,10 @@ export function formatStyleFacts(
   const minimal: StyleFacts = {
     props: {},
     ...(facts.geometry === undefined ? {} : { geometry: facts.geometry }),
+    // Unreachable in practice — the group drop order never touches these two, so
+    // whatever is left here already fits. Kept as a floor, and as the statement
+    // of priority if that order ever changes.
+    ...(facts.derived === undefined ? {} : { derived: facts.derived }),
   };
   return { lines: blockLines(minimal, marker, header), truncated: true };
 }

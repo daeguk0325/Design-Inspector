@@ -263,6 +263,31 @@ export interface StyleFactsGeometry {
   height: number;
 }
 
+export interface StyleFactsContrast {
+  /** WCAG 2.x ratio, two decimals, 1..21. */
+  ratio: number;
+  /** The threshold that applied: 4.5, or 3 for large text. */
+  min: number;
+  pass: boolean;
+  large: boolean;
+  /** The resolved backdrop the text is drawn on, as #rrggbb. */
+  background: string;
+}
+
+export interface StyleFactsDerived {
+  /**
+   * Either a verdict, or `{ unmeasurable: true }` when the backdrop is an
+   * image, a gradient, a blend, or otherwise not a flat colour. The
+   * unmeasurable form is a real answer: it is what stops the model filling the
+   * gap with a number of its own.
+   */
+  contrast?: StyleFactsContrast | { unmeasurable: true };
+  /** Present only when the content overflows its box. */
+  truncated?: true;
+  /** `loaded` is the expected state and is omitted. */
+  fontLoad?: 'fallback' | 'unknown';
+}
+
 export interface StyleFacts {
   /** CSS longhand name → computed value. Defaults already omitted. */
   props: Record<string, string>;
@@ -270,6 +295,8 @@ export interface StyleFacts {
   label?: string;
   ancestors?: string[];
   tagName?: string;
+  /** Computed here rather than asked of the model. */
+  derived?: StyleFactsDerived;
 }
 
 export function cleanStyleValue(value: string, max: number): string | null {
@@ -446,11 +473,295 @@ function collectGeometry(el: Element): StyleFactsGeometry | null {
   }
 }
 
+// ---- Derived measurements (§9e) ---------------------------------------------
+// Everything here is arithmetic a model would otherwise be asked to do. The
+// observed failure was concrete: the same two colours came back as 4.80:1 in
+// one run and 3.2:1 in the next. A number that moves between runs is not a
+// measurement, so the arithmetic happens once, here, where there is only one
+// way to get it right — and where a value that cannot be measured is reported
+// as unmeasurable instead of estimated.
+
+interface StyleFactRgba {
+  r: number;
+  g: number;
+  b: number;
+  /** 0..1 */
+  a: number;
+}
+
+const DERIVED_HEX3 = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i;
+const DERIVED_HEX4 = /^#([0-9a-f])([0-9a-f])([0-9a-f])([0-9a-f])$/i;
+const DERIVED_HEX6 = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i;
+const DERIVED_HEX8 = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i;
+const DERIVED_RGB_FN =
+  /^rgba?\(\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[,/]\s*(\d{1,3})\s*(?:[,/]\s*([\d.]+)\s*%?\s*)?\)$/i;
+const DERIVED_NUMERIC = /^[+-]?(?:\d+\.?\d*|\.\d+)$/;
+
+/** Channels out of an already-normalized value: #rgb, #rgba, #rrggbb, #rrggbbaa, rgb(), rgba(). */
+function parseStyleColorChannels(value: string): StyleFactRgba | null {
+  const text = value.trim();
+  if (STYLE_FACT_TRANSPARENT.test(text)) return { r: 0, g: 0, b: 0, a: 0 };
+  const short3 = DERIVED_HEX3.exec(text);
+  if (short3) {
+    return {
+      r: parseInt(short3[1] + short3[1], 16),
+      g: parseInt(short3[2] + short3[2], 16),
+      b: parseInt(short3[3] + short3[3], 16),
+      a: 1,
+    };
+  }
+  const short4 = DERIVED_HEX4.exec(text);
+  if (short4) {
+    return {
+      r: parseInt(short4[1] + short4[1], 16),
+      g: parseInt(short4[2] + short4[2], 16),
+      b: parseInt(short4[3] + short4[3], 16),
+      a: parseInt(short4[4] + short4[4], 16) / 255,
+    };
+  }
+  const long6 = DERIVED_HEX6.exec(text);
+  if (long6) {
+    return { r: parseInt(long6[1], 16), g: parseInt(long6[2], 16), b: parseInt(long6[3], 16), a: 1 };
+  }
+  const long8 = DERIVED_HEX8.exec(text);
+  if (long8) {
+    return {
+      r: parseInt(long8[1], 16),
+      g: parseInt(long8[2], 16),
+      b: parseInt(long8[3], 16),
+      a: parseInt(long8[4], 16) / 255,
+    };
+  }
+  const fn = DERIVED_RGB_FN.exec(text);
+  if (!fn) return null;
+  const channel = (raw: string | undefined): number => {
+    if (raw === undefined) return 0;
+    const n = Number(raw);
+    return Number.isFinite(n) ? Math.min(255, Math.max(0, n)) : 0;
+  };
+  const alpha = fn[4] === undefined ? 1 : Number(fn[4]);
+  return {
+    r: channel(fn[1]),
+    g: channel(fn[2]),
+    b: channel(fn[3]),
+    a: Number.isFinite(alpha) ? Math.min(1, Math.max(0, fn[4]?.endsWith('%') ? alpha / 100 : alpha)) : 1,
+  };
+}
+
+function channelHex(value: number): string {
+  return Math.round(value).toString(16).padStart(2, '0');
+}
+
+/** The backdrop colour the text is actually drawn on, or null if unknowable. */
+function effectiveBackdrop(el: Element): StyleFactRgba | null {
+  let current: Element | null = el;
+  // The walk needs its own getComputedStyle calls; the ancestor chain in
+  // `ancestors` is a string chain and never touched a style.
+  while (current) {
+    let computed: CSSStyleDeclaration;
+    try {
+      computed = window.getComputedStyle(current);
+    } catch {
+      return null;
+    }
+    if (!computed) return null;
+    // A gradient or image anywhere in the chain means the flat colour under
+    // the text is not the colour the text sits on.
+    let image: string;
+    let color: string;
+    let opacity: string;
+    try {
+      image = computed.getPropertyValue('background-image');
+      color = computed.getPropertyValue('background-color');
+      opacity = computed.getPropertyValue('opacity');
+    } catch {
+      return null;
+    }
+    if (image.trim() !== '' && image.trim().toLowerCase() !== 'none') return null;
+    if (opacity.trim() !== '' && Number(opacity) < 1) return null;
+    const channels = parseStyleColorChannels(normalizeStyleColor(color) ?? '');
+    if (channels && channels.a > 0) return channels;
+    const parent: Element | null = current.parentElement;
+    // The canvas is opaque by definition, and a page that paints no background
+    // is white — that is the one assumption made here, and it is the browser's
+    // own default rather than a guess about the design.
+    if (!parent || parent === document.documentElement.parentElement) {
+      return { r: 255, g: 255, b: 255, a: 1 };
+    }
+    current = parent;
+  }
+  return { r: 255, g: 255, b: 255, a: 1 };
+}
+
+/** WCAG 2.x relative luminance, in sRGB. */
+function relativeLuminance(color: StyleFactRgba): number {
+  const channel = (raw: number): number => {
+    const c = raw / 255;
+    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b);
+}
+
+function contrastRatio(foreground: StyleFactRgba, background: StyleFactRgba): number {
+  const a = relativeLuminance(foreground);
+  const b = relativeLuminance(background);
+  const lighter = Math.max(a, b);
+  const darker = Math.min(a, b);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function parseStyleNumber(value: string): number | null {
+  const text = value.trim();
+  if (!DERIVED_NUMERIC.test(text)) return null;
+  const n = Number(text);
+  return Number.isFinite(n) ? n : null;
+}
+
 /**
- * One getComputedStyle + one getBoundingClientRect per record. There is no
- * per-record cache on purpose: the record's target is null after a route
- * change, and emitSnapshot only fires on discrete events, so a live read is
- * both always-correct and cheap enough.
+ * A length in px. getComputedStyle resolves font-size to `24px`, not `24`, so
+ * a bare-number parser would read every real font size as zero and the
+ * large-text threshold could never fire in a browser.
+ */
+function parseStylePixels(value: string): number | null {
+  const text = value.trim();
+  if (text.endsWith('px')) return parseStyleNumber(text.slice(0, -2));
+  return parseStyleNumber(text);
+}
+
+/** WCAG 1.4.3: 4.5:1 normally, 3:1 at 18pt, or 14pt bold. */
+function contrastMinimum(fontSize: number, fontWeight: number): { min: number; large: boolean } {
+  const large = fontSize >= 24 || (fontSize >= 18.66 && fontWeight >= 700);
+  return { min: large ? 3 : 4.5, large };
+}
+
+/**
+ * Three outcomes, not two. A verdict, `unmeasurable` when the styles were read
+ * and the backdrop genuinely is not a flat colour, and null when the inputs
+ * could not be read at all — an element with no text has no contrast, and
+ * calling that "unmeasurable" would fill every prompt with a caveat about
+ * something nobody asked.
+ */
+function collectContrast(
+  el: Element,
+  computed: CSSStyleDeclaration,
+): StyleFactsContrast | { unmeasurable: true } | null {
+  const text = parseStyleColorChannels(normalizeStyleColor(computed.getPropertyValue('color')) ?? '');
+  if (!text || text.a === 0) return null;
+  const backdrop = effectiveBackdrop(el);
+  if (!backdrop) return { unmeasurable: true };
+  let opacity: string;
+  try {
+    opacity = computed.getPropertyValue('opacity');
+  } catch {
+    return null;
+  }
+  const alpha = parseStyleNumber(opacity);
+  if (alpha !== null && alpha < 1) return { unmeasurable: true };
+  // Source-over in sRGB, which is what the compositor does.
+  const composedText: StyleFactRgba =
+    text.a >= 1
+      ? { r: text.r, g: text.g, b: text.b, a: 1 }
+      : {
+          r: text.r * text.a + backdrop.r * (1 - text.a),
+          g: text.g * text.a + backdrop.g * (1 - text.a),
+          b: text.b * text.a + backdrop.b * (1 - text.a),
+          a: 1,
+        };
+  const size = parseStylePixels(computed.getPropertyValue('font-size')) ?? 0;
+  const weight = parseStyleNumber(computed.getPropertyValue('font-weight')) ?? 400;
+  const { min, large } = contrastMinimum(size, weight);
+  const ratio = Math.round(contrastRatio(composedText, backdrop) * 100) / 100;
+  return {
+    ratio,
+    min,
+    pass: ratio >= min,
+    large,
+    background: `#${channelHex(backdrop.r)}${channelHex(backdrop.g)}${channelHex(backdrop.b)}`,
+  };
+}
+
+/**
+ * Content-box overflow. `false` is the expected state and is not reported: the
+ * absence of this field means "not truncated", the same way an omitted
+ * default-valued property means "nothing surprising here".
+ */
+function collectTruncated(el: Element): boolean | null {
+  try {
+    const clientWidth = el.clientWidth;
+    const clientHeight = el.clientHeight;
+    // A zero client box means there is no layout to overflow, which is a
+    // measurement failure rather than a measurement of "fits".
+    if (!Number.isFinite(clientWidth) || clientWidth <= 0) return null;
+    const horizontal = el.scrollWidth > clientWidth + 1;
+    const vertical = Number.isFinite(clientHeight) && clientHeight > 0 && el.scrollHeight > clientHeight + 1;
+    return horizontal || vertical ? true : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Only a font the document actually declares can fail to load. */
+function collectFontLoad(computed: CSSStyleDeclaration): 'fallback' | 'unknown' | null {
+  const stack = computed.getPropertyValue('font-family').trim();
+  if (stack.length === 0) return null;
+  const family = stack.split(',')[0]?.trim().replace(/^["']|["']$/g, '') ?? '';
+  if (family.length === 0 || family === 'inherit' || family === 'initial') return null;
+  const fonts = (document as Document & { fonts?: FontFaceSet }).fonts;
+  if (!fonts || typeof fonts.check !== 'function') return 'unknown';
+  let declared = false;
+  try {
+    for (const face of fonts) {
+      const name = face.family.trim().replace(/^["']|["']$/g, '').toLowerCase();
+      if (name === family.toLowerCase()) {
+        declared = true;
+        break;
+      }
+    }
+  } catch {
+    return 'unknown';
+  }
+  // A family the document never declared is a local or system font; there is
+  // no load event that could have failed, so there is nothing to report.
+  if (!declared) return null;
+  const weight = computed.getPropertyValue('font-weight').trim();
+  try {
+    return fonts.check(`${weight || '400'} 16px ${family}`) ? null : 'fallback';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function collectDerived(el: Element, computed: CSSStyleDeclaration): StyleFactsDerived | null {
+  const derived: StyleFactsDerived = {};
+  let present = false;
+  try {
+    const contrast = collectContrast(el, computed);
+    if (contrast !== null) {
+      derived.contrast = contrast;
+      present = true;
+    }
+  } catch {
+    // A measurement that throws is not a measurement.
+  }
+  const truncated = collectTruncated(el);
+  if (truncated === true) {
+    derived.truncated = true;
+    present = true;
+  }
+  const fontLoad = collectFontLoad(computed);
+  if (fontLoad !== null) {
+    derived.fontLoad = fontLoad;
+    present = true;
+  }
+  return present ? derived : null;
+}
+
+/**
+ * One live read per record, uncached: the record's target is null after a route
+ * change, and emitSnapshot only fires on discrete events, so reading on demand is
+ * both always-correct and cheap enough. The derived measurements add more reads
+ * of their own — the backdrop walk reads up the ancestor chain, and only when
+ * the element's own background is transparent.
  */
 export function collectStyleFacts(el: Element): StyleFacts | undefined {
   let computed: CSSStyleDeclaration;
@@ -491,6 +802,7 @@ export function collectStyleFacts(el: Element): StyleFacts | undefined {
   const label = collectLabel(el);
   const ancestors = collectAncestors(el);
   const tagName = styleTagName(el);
+  const derived = collectDerived(el, computed);
 
   // Drop the currentColor echoes now that `color` has been resolved. `color` is
   // the first property in the list, so it is already decided by this point; if
@@ -505,7 +817,14 @@ export function collectStyleFacts(el: Element): StyleFacts | undefined {
     }
   }
 
-  if (count === 0 && geometry === null && label === null && ancestors.length === 0 && tagName === null) {
+  if (
+    count === 0 &&
+    geometry === null &&
+    label === null &&
+    ancestors.length === 0 &&
+    tagName === null &&
+    derived === null
+  ) {
     return undefined;
   }
   return {
@@ -514,6 +833,7 @@ export function collectStyleFacts(el: Element): StyleFacts | undefined {
     ...(label === null ? {} : { label }),
     ...(ancestors.length === 0 ? {} : { ancestors }),
     ...(tagName === null ? {} : { tagName }),
+    ...(derived === null ? {} : { derived }),
   };
 }
 

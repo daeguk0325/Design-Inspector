@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { defaultJobFilePath, lenientJsonParse, readJobFile } from './jobfile.mjs';
+import { handleSourceRequest } from './source-reader.mjs';
 import {
   createTargetProxy,
   normalizeAppOrigin,
@@ -27,6 +28,13 @@ import {
 } from './supervisor.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * How much of the file to hand back around a cited line. Enough to see the
+ * component and its neighbours, not enough to turn the route into a file dump.
+ */
+const DEFAULT_SOURCE_BEFORE = 8;
+const DEFAULT_SOURCE_AFTER = 8;
 
 function arg(name, fallback = null) {
   const i = process.argv.findIndex(
@@ -254,6 +262,23 @@ const server = createServer(async (req, res) => {
     }
     res.writeHead(200, headers);
     res.end(body);
+    return;
+  }
+
+  if (req.method === 'GET' && path === '/api/target/source') {
+    const requestOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+    const requested = new URL(req.url ?? '/', `http://127.0.0.1:${SUPERVISOR_PORT}`);
+    const job = await readJobFile(JOB_PATH);
+    const answer = handleSourceRequest({
+      authorized: !requestOrigin || isCurrentAppOrigin(requestOrigin),
+      origin: requestOrigin,
+      root: job?.dir ?? '',
+      path: requested.searchParams.get('path'),
+      line: Number(requested.searchParams.get('line') ?? 0),
+      before: Number(requested.searchParams.get('before') ?? DEFAULT_SOURCE_BEFORE),
+      after: Number(requested.searchParams.get('after') ?? DEFAULT_SOURCE_AFTER),
+    });
+    sendJson(res, answer.status, answer.body, answer.origin);
     return;
   }
 

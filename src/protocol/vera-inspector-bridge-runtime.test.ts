@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initVeraInspectorBridge } from '../../bridge/vera-inspector-bridge.ts';
 import { validateBridgeMessage } from './validate.ts';
 import type { ValidationContext } from './validate.ts';
+import type { StyleFacts } from './types.ts';
 
 const APP_ORIGIN = 'http://app.test';
 const PREVIEW_ATTRIBUTE_PREFIX = 'data-vera-inspector-pv-';
@@ -1000,6 +1001,98 @@ describe('bridge destroy', () => {
 describe('style facts on the wire', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    // jsdom ships no FontFaceSet, so a stub left behind here would decide the
+    // next test's fontLoad instead of the next test.
+    Reflect.deleteProperty(document, 'fonts');
+  });
+
+  it('carries a derived contrast verdict on the wire, and the app side accepts it', () => {
+    // The probe button: near-black on the brand blue at 14px/600, which is
+    // normal text, so the AA minimum is 4.5. Luminances 0.0130 and 0.2456 give
+    // 0.2956 / 0.0630 = 4.69.
+    vi.spyOn(window, 'getComputedStyle').mockImplementation(
+      () =>
+        ({
+          getPropertyValue: (property: string) =>
+            ({
+              color: 'rgb(30, 30, 30)',
+              'background-color': 'rgb(56, 132, 255)',
+              'font-size': '14px',
+              'font-weight': '600',
+              display: 'inline-flex',
+            })[property] ?? '',
+        }) as unknown as CSSStyleDeclaration,
+    );
+    const harness = createHarness();
+    harness.hello();
+    // Freeze before the mark: the shield is what routes the click to a selection.
+    harness.freeze(true);
+    harness.mark(mountElement('probe', 'button'));
+    const record = harness.typed('VERA_INSPECTOR_SELECTION').at(-1)?.payload['record'] as
+      | Record<string, unknown>
+      | undefined;
+    const styleFacts = record?.['styleFacts'] as StyleFacts | undefined;
+    expect(styleFacts?.derived?.contrast).toEqual({
+      ratio: 4.69,
+      min: 4.5,
+      pass: true,
+      large: false,
+      background: '#3884ff',
+    });
+    // The decisive assertion. validate.ts is a second, stricter reader of the
+    // same payload: a ratio outside 1..21, a `truncated: false`, a bare
+    // `derived: {}` or a contrast with a key riding along would all be dropped
+    // there, and the Bridge's own liveness gate would not notice. This proves
+    // the new key survives the reader that actually has to accept it.
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('carries unmeasurable, truncated and fontLoad through the validator as well', () => {
+    // The three shapes validate.ts treats differently from a verdict: the
+    // unmeasurable marker has its own key set, `truncated` is true-only, and
+    // fontLoad is a closed vocabulary. A record exercising all three at once is
+    // the cheapest way to keep the three branches honest.
+    Object.defineProperty(document, 'fonts', {
+      value: Object.assign([{ family: 'Pretendard' }], { check: () => false }),
+      configurable: true,
+    });
+    vi.spyOn(window, 'getComputedStyle').mockImplementation(
+      () =>
+        ({
+          getPropertyValue: (property: string) =>
+            ({
+              color: 'rgb(255, 255, 255)',
+              'background-image': 'linear-gradient(rgb(30, 30, 30), rgb(56, 132, 255))',
+              'font-family': 'Pretendard',
+              'font-weight': '600',
+              'font-size': '14px',
+            })[property] ?? '',
+        }) as unknown as CSSStyleDeclaration,
+    );
+    const harness = createHarness();
+    harness.hello();
+    harness.freeze(true);
+    const button = mountElement('gradient-label', 'button');
+    // jsdom has no layout, so the overflow the Bridge looks for has to exist.
+    for (const [name, value] of Object.entries({
+      clientWidth: 88,
+      clientHeight: 32,
+      scrollWidth: 240,
+      scrollHeight: 32,
+    })) {
+      Object.defineProperty(button, name, { value, configurable: true });
+    }
+    harness.mark(button);
+    const record = harness.typed('VERA_INSPECTOR_SELECTION').at(-1)?.payload['record'] as
+      | Record<string, unknown>
+      | undefined;
+    const styleFacts = record?.['styleFacts'] as StyleFacts | undefined;
+    expect(styleFacts?.derived).toEqual({
+      contrast: { unmeasurable: true },
+      truncated: true,
+      fontLoad: 'fallback',
+    });
+    expect(harness.contractFailures()).toEqual([]);
   });
 
   it('emits facts the app-side validator accepts', () => {

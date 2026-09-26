@@ -96,8 +96,20 @@ const STYLE_FACT_KEYS: ReadonlySet<string> = new Set([
   'label',
   'ancestors',
   'tagName',
+  'derived',
 ]);
 const STYLE_FACT_GEOMETRY_KEYS: ReadonlySet<string> = new Set(['x', 'y', 'width', 'height']);
+const STYLE_FACT_DERIVED_KEYS: ReadonlySet<string> = new Set(['contrast', 'truncated', 'fontLoad']);
+const STYLE_FACT_CONTRAST_KEYS: ReadonlySet<string> = new Set([
+  'ratio',
+  'min',
+  'pass',
+  'large',
+  'background',
+]);
+const STYLE_FACT_UNMEASURABLE_KEYS: ReadonlySet<string> = new Set(['unmeasurable']);
+const STYLE_FACT_FONT_LOAD_VALUES: ReadonlySet<string> = new Set(['fallback', 'unknown']);
+const STYLE_FACT_HEX_COLOR = /^#[0-9a-f]{6}$/i;
 const STYLE_FACT_ALLOWED_PROPS: ReadonlySet<string> = new Set([
   'color', 'background-color',
   'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color',
@@ -235,6 +247,15 @@ function isBoundedInt(value: unknown, min: number, max: number): value is number
   return (
     typeof value === 'number' &&
     Number.isSafeInteger(value) &&
+    value >= min &&
+    value <= max
+  );
+}
+
+function isBoundedNumber(value: unknown, min: number, max: number): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
     value >= min &&
     value <= max
   );
@@ -482,6 +503,44 @@ function isStyleFactGeometryValid(value: unknown): boolean {
   );
 }
 
+function isStyleFactContrastValid(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value['unmeasurable'] !== undefined) {
+    // Exactly the unmeasurable marker, nothing else riding along with it.
+    return value['unmeasurable'] === true && hasOnlyKeys(value, STYLE_FACT_UNMEASURABLE_KEYS);
+  }
+  if (!hasOnlyKeys(value, STYLE_FACT_CONTRAST_KEYS)) return false;
+  if (Object.keys(value).length !== STYLE_FACT_CONTRAST_KEYS.size) return false;
+  const background = value['background'];
+  return (
+    // A ratio is the one non-integer number in the protocol, so it gets an
+    // explicit range instead of the integer helper.
+    isBoundedNumber(value['ratio'], 1, 21) &&
+    isBoundedNumber(value['min'], 1, 21) &&
+    typeof value['pass'] === 'boolean' &&
+    typeof value['large'] === 'boolean' &&
+    isBoundedString(background, 7) &&
+    STYLE_FACT_HEX_COLOR.test(background)
+  );
+}
+
+function isStyleFactsDerivedValid(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (!hasOnlyKeys(value, STYLE_FACT_DERIVED_KEYS)) return false;
+  if (Object.keys(value).length === 0) return false;
+  const contrast = value['contrast'];
+  if (contrast !== undefined && !isStyleFactContrastValid(contrast)) return false;
+  const truncated = value['truncated'];
+  // `true` only: a `false` here would be the unremarkable state, which the
+  // Bridge omits rather than sends.
+  if (truncated !== undefined && truncated !== true) return false;
+  const fontLoad = value['fontLoad'];
+  if (fontLoad !== undefined && (typeof fontLoad !== 'string' || !STYLE_FACT_FONT_LOAD_VALUES.has(fontLoad))) {
+    return false;
+  }
+  return true;
+}
+
 function isStyleFactsValid(value: unknown): boolean {
   if (!isRecord(value)) return false;
   if (!hasOnlyKeys(value, STYLE_FACT_KEYS)) return false;
@@ -494,6 +553,8 @@ function isStyleFactsValid(value: unknown): boolean {
   if (tagName !== undefined) {
     if (!isBoundedString(tagName, L.styleFactTagNameChars) || !CSS_TAG_NAME_RE.test(tagName)) return false;
   }
+  const derived = value['derived'];
+  if (derived !== undefined && !isStyleFactsDerivedValid(derived)) return false;
   const ancestors = value['ancestors'];
   if (ancestors === undefined) return true;
   if (!Array.isArray(ancestors) || ancestors.length > L.styleFactAncestors) return false;

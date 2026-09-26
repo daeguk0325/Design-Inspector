@@ -54,6 +54,30 @@ export interface StyleFactsGeometry {
   height: number;
 }
 
+export interface StyleFactsContrast {
+  /** WCAG 2.x ratio, two decimals, 1..21. */
+  ratio: number;
+  /** The threshold that applied: 4.5, or 3 for large text. */
+  min: number;
+  pass: boolean;
+  large: boolean;
+  /** The resolved backdrop the text is drawn on, as #rrggbb. */
+  background: string;
+}
+
+export interface StyleFactsDerived {
+  /**
+   * Either a verdict, or `{ unmeasurable: true }` when the backdrop is an
+   * image, a gradient, or otherwise not a flat colour. The unmeasurable form
+   * is a real answer: it is what stops the model filling the gap itself.
+   */
+  contrast?: StyleFactsContrast | { unmeasurable: true };
+  /** Present only when the content overflows its box. */
+  truncated?: true;
+  /** `loaded` is the expected state and is omitted. */
+  fontLoad?: 'fallback' | 'unknown';
+}
+
 export interface StyleFacts {
   /** CSS longhand name → computed value. Per-property defaults already omitted. */
   props: Record<string, string>;
@@ -63,6 +87,8 @@ export interface StyleFacts {
   /** Nearest-first ancestor chain, e.g. ["header.nav", "main"]. */
   ancestors?: string[];
   tagName?: string;
+  /** Computed by the Bridge rather than asked of the model. */
+  derived?: StyleFactsDerived;
 }
 
 export interface SelectionRecord {

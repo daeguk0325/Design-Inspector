@@ -1,4 +1,10 @@
-import type { InspectorMode, SelectionRecord, StyleFacts } from '../protocol/types.ts';
+import { useEffect, useState } from 'react';
+import type {
+  InspectorMode,
+  SelectionRecord,
+  StyleFacts,
+  StyleFactsDerived,
+} from '../protocol/types.ts';
 import {
   STYLE_FACT_GROUP_LABEL,
   isColorProperty,
@@ -6,6 +12,8 @@ import {
   swatchColor,
 } from '../style/properties.ts';
 import { groupStyleFacts, sanitizeStyleFacts } from '../style/sanitize.ts';
+import { sourceSnippet } from '../target/sourceCache.ts';
+import type { SourceResult } from '../target/source.ts';
 
 export interface ComponentDetailsProps {
   record: SelectionRecord;
@@ -167,9 +175,78 @@ function styleView(record: SelectionRecord): StyleFactView | null {
   return { facts, sections: [...sections.values()] };
 }
 
+/**
+ * The derived measurements, phrased as answers. A contrast that could not be
+ * measured says so: the panel is where someone checks whether the tool knows,
+ * and a blank row would read as "no problem found".
+ */
+function derivedRows(derived: StyleFactsDerived | undefined): Array<{ label: string; value: string; swatch: string | null }> {
+  if (derived === undefined) return [];
+  const rows: Array<{ label: string; value: string; swatch: string | null }> = [];
+  const contrast = derived.contrast;
+  if (contrast !== undefined) {
+    if ('unmeasurable' in contrast) {
+      rows.push({ label: 'Contrast', value: 'not measurable', swatch: null });
+    } else {
+      rows.push({
+        label: 'Contrast',
+        value: `${contrast.ratio}:1 · AA ${contrast.pass ? 'pass' : 'fail'} (min ${contrast.min})`,
+        swatch: contrast.background,
+      });
+    }
+  }
+  if (derived.truncated === true) rows.push({ label: 'Text', value: 'truncated', swatch: null });
+  if (derived.fontLoad !== undefined) {
+    rows.push({ label: 'Font load', value: derived.fontLoad, swatch: null });
+  }
+  return rows;
+}
+
+/**
+ * The cited source, if the target reported a location and the project file can
+ * be read. A target that sets no `data-inspector-file` gets nothing here and
+ * nothing is requested — an empty panel that says "unavailable" every time
+ * would be noise, and the location row above already says so.
+ */
+function SourceBlock({ record }: { record: SelectionRecord }) {
+  const [result, setResult] = useState<SourceResult | null>(null);
+  useEffect(() => {
+    let live = true;
+    setResult(null);
+    if (record.file === null) return;
+    void sourceSnippet({ path: record.file, line: record.line }).then((next) => {
+      if (live) setResult(next);
+    });
+    return () => {
+      live = false;
+    };
+  }, [record.file, record.line]);
+
+  if (record.file === null || result === null || !result.ok) return null;
+  const { snippet } = result;
+  return (
+    <div className="cdetails-source">
+      <h5 className="cdetails-style-group-label">
+        Source <span className="cdetails-mono">{`${snippet.path}:${snippet.startLine}`}</span>
+      </h5>
+      <pre className="cdetails-source-code">
+        {snippet.lines.map((line, index) => (
+          <span className="cdetails-source-line" key={`${snippet.startLine + index}`}>
+            <span className="cdetails-source-no" aria-hidden="true">
+              {snippet.startLine + index}
+            </span>
+            <span className="cdetails-source-text">{line}</span>
+          </span>
+        ))}
+      </pre>
+    </div>
+  );
+}
+
 export function ComponentDetails({ record, className }: ComponentDetailsProps) {
   const rows = detailRows(record);
   const style = styleView(record);
+  const measured = derivedRows(style?.facts.derived);
   const name = detailsName(record);
   return (
     <div
@@ -185,7 +262,7 @@ export function ComponentDetails({ record, className }: ComponentDetailsProps) {
           </div>
         ))}
       </dl>
-      {style !== null && style.sections.length > 0 && (
+      {style !== null && (style.sections.length > 0 || measured.length > 0) && (
         <div className="cdetails-style">
           <h4 className="cdetails-style-title">Style facts</h4>
           <dl className="cdetails-list">
@@ -202,12 +279,12 @@ export function ComponentDetails({ record, className }: ComponentDetailsProps) {
               </div>
             )}
           </dl>
-          {style.sections.map((section) => (
-            <div className="cdetails-style-group" key={section.group}>
-              <h5 className="cdetails-style-group-label">{STYLE_FACT_GROUP_LABEL[section.group]}</h5>
+          {measured.length > 0 && (
+            <>
+              <h5 className="cdetails-style-group-label">Measured</h5>
               <dl className="cdetails-list">
-                {section.rows.map((row) => (
-                  <div className="cdetails-row" key={`${row.label}-${row.value}`}>
+                {measured.map((row) => (
+                  <div className="cdetails-row" key={row.label}>
                     <dt>{row.label}</dt>
                     <dd className="cdetails-mono">
                       {row.swatch !== null && (
@@ -222,10 +299,34 @@ export function ComponentDetails({ record, className }: ComponentDetailsProps) {
                   </div>
                 ))}
               </dl>
-            </div>
-          ))}
+            </>
+          )}
+          {style.sections.length > 0 &&
+            style.sections.map((section) => (
+              <div className="cdetails-style-group" key={section.group}>
+                <h5 className="cdetails-style-group-label">{STYLE_FACT_GROUP_LABEL[section.group]}</h5>
+                <dl className="cdetails-list">
+                  {section.rows.map((row) => (
+                    <div className="cdetails-row" key={`${row.label}-${row.value}`}>
+                      <dt>{row.label}</dt>
+                      <dd className="cdetails-mono">
+                        {row.swatch !== null && (
+                          <span
+                            className="cdetails-swatch"
+                            style={{ background: row.swatch }}
+                            aria-hidden="true"
+                          />
+                        )}
+                        {row.value}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            ))}
         </div>
       )}
+      <SourceBlock record={record} />
     </div>
   );
 }

@@ -50,6 +50,9 @@ export interface ChangeLogEntry {
   order: number;
   component: string;
   elementKey: string;
+  /** Project-relative source location, when the target reported one. */
+  file: string | null;
+  line: number | null;
   property: string;
   /** Measured value at inspection time, or null when never measured. */
   before: string | null;
@@ -177,16 +180,21 @@ export function buildChangeLog(
       for (const [property, after] of Object.entries(change.declarations)) {
         if (entries.length >= MAX_CHANGE_LOG_ENTRIES) return entries;
         const measured = facts?.[property];
-        entries.push({
-          messageId: proposal.messageId,
-          transactionId: proposal.transactionId,
-          order: proposal.order,
-          component: componentName(change, proposal.citations),
-          elementKey: change.anchor.elementKey,
-          property,
-          before: measured === undefined || measured === '' ? null : measured,
-          after,
-        });
+          entries.push({
+            messageId: proposal.messageId,
+            transactionId: proposal.transactionId,
+            order: proposal.order,
+            component: componentName(change, proposal.citations),
+            elementKey: change.anchor.elementKey,
+            // The location the target reported for the element the change was
+            // applied to. Null whenever the target sets no metadata: the bridge
+            // never invents a location, and neither does this.
+            file: citation?.file ?? null,
+            line: citation?.line ?? null,
+            property,
+            before: measured === undefined || measured === '' ? null : measured,
+            after,
+          });
       }
     }
   }
@@ -195,6 +203,9 @@ export function buildChangeLog(
 
 export interface ChangeLogGroup {
   component: string;
+  /** Where the first entry's element lives, when the target reported it. */
+  file: string | null;
+  line: number | null;
   entries: ChangeLogEntry[];
 }
 
@@ -204,14 +215,26 @@ export function groupChangeLog(
   transactions: readonly PreviewTransaction[],
 ): ChangeLogGroup[] {
   const groups: ChangeLogGroup[] = [];
-  const byComponent = new Map<string, ChangeLogEntry[]>();
+  const byComponent = new Map<string, ChangeLogGroup>();
   for (const entry of buildChangeLog(messages, transactions)) {
     const bucket = byComponent.get(entry.component);
-    if (bucket) bucket.push(entry);
-    else {
-      const fresh = [entry];
+    if (bucket) {
+      bucket.entries.push(entry);
+      // A later entry for the same component may be the one that carries a
+      // location, so take the first that has one rather than the first seen.
+      if (bucket.file === null && entry.file !== null) {
+        bucket.file = entry.file;
+        bucket.line = entry.line;
+      }
+    } else {
+      const fresh: ChangeLogGroup = {
+        component: entry.component,
+        file: entry.file,
+        line: entry.line,
+        entries: [entry],
+      };
       byComponent.set(entry.component, fresh);
-      groups.push({ component: entry.component, entries: fresh });
+      groups.push(fresh);
     }
   }
   return groups;

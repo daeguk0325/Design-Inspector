@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { InspectorSession } from '../state/models.ts';
 import type { ChangeLogGroup } from '../preview/proposal.ts';
 import { changeLogGroupsForSession, pendingForSession } from '../preview/proposal.ts';
 import { buildProposalDocument } from '../preview/proposalDocument.ts';
+import { sourceSnippets } from '../target/sourceCache.ts';
+import type { SourceSnippet } from '../target/source.ts';
 
 export interface ProposalPanelProps {
   open: boolean;
@@ -18,9 +20,34 @@ export interface ProposalPanelProps {
  */
 export function ProposalPanel({ open, session, onClose, onCopy }: ProposalPanelProps) {
   const [copied, setCopied] = useState<'log' | 'document' | null>(null);
+  const [snippets, setSnippets] = useState<ReadonlyMap<string, SourceSnippet>>(new Map());
   const groups = useMemo(() => changeLogGroupsForSession(session), [session]);
   const pending = useMemo(() => pendingForSession(session), [session]);
-  const document_ = useMemo(() => buildProposalDocument(session), [session]);
+
+  // The source is fetched for the document, not for this panel: it is the
+  // artifact someone hands to an implementer that needs to say where to edit.
+  // A target with no metadata never produces a request.
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    const wanted = groups
+      .filter((group) => group.file !== null)
+      .map((group) => ({ path: group.file, line: group.line }));
+    if (wanted.length === 0) {
+      // Nothing to ask for: clear rather than leave a previous session's
+      // snippets in state, where they would outlive what they describe.
+      setSnippets(new Map());
+      return;
+    }
+    void sourceSnippets(wanted).then((next) => {
+      if (live) setSnippets(next);
+    });
+    return () => {
+      live = false;
+    };
+  }, [open, groups]);
+
+  const document_ = useMemo(() => buildProposalDocument(session, snippets), [session, snippets]);
   const changeCount = document_.changeCount;
 
   if (!open) return null;
