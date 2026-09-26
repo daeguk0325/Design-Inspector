@@ -417,8 +417,34 @@ element while `inline-flex` is the whole point. `STYLE_FACT_DEFAULTS` and
 
 56 longhand properties in five groups (color 10, typography 11, box 19, layout
 12, motion 4). Longhands only — a shorthand would hide a single differing side.
-`background-color: rgba(0,0,0,0)` is filtered, which matters because otherwise
-every element reports a transparent background.
+
+Two rules in here were **wrong until a real page was measured** (see
+`VERIFICATION_REPORT.md`, "Live real-capture verification"):
+
+- `background-color` is **not** treated as a default. Filtering
+  `rgba(0,0,0,0)` looked right in the fixtures, but in practice it made the
+  model answer "버튼 2 배경색 확인 불가" about a ghost button whose background
+  was plainly knowable. The filter manufactured a gap in the evidence it was
+  meant to keep tight. `transparent` is a fact about a component.
+- `border-*-color`, `outline-color` and `caret-color` have initial value
+  `currentColor`, so `getComputedStyle` resolves them to the element's own text
+  colour. When the computed value equals `color` it is an echo, not an authored
+  choice, and is dropped. This cannot distinguish an author who deliberately
+  matched the border to the text from one who inherited it; the width and style
+  survive, and the colour is recoverable from `color`.
+
+`fill` and `stroke` initial to `black`, not `none` — getting that wrong put
+`fill: rgb(0,0,0)` on every HTML element.
+
+### The facts block uses display shorthand, which is not CSS
+
+The block reads `box=`, `radius=`, `font=`, `bg=`, `at=`, `inside=`, `style=`,
+`label=` for density. A 9B model read `box=12px 16px` as a declaration key and
+emitted `{"box":"12px 16px"}` in a preview block, which `validatePreviewBlock`
+rejected as `unknown-property` — discarding the valid declarations beside it. The
+system prompt now states that those tokens are labels and maps them to the real
+properties. The machine channel is guarded twice: by the prompt and by the
+sidecar.
 
 ### Colours are normalized to sRGB before they leave the target
 

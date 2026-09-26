@@ -439,6 +439,16 @@ describe('buildTransmissionPrompt', () => {
     expect(prompt).toContain('This request is about: color, typography.');
   });
 
+  it('states that the facts display shorthand is not a CSS property name', () => {
+    // Regression: with a 9B model, "box=12px 16px" in the facts was read as a
+    // declaration key. validatePreviewBlock then rejects the whole rule as
+    // unknown-property, discarding the valid declarations beside it.
+    expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain('NOT CSS property names');
+    expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain('box -> padding');
+    expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain('radius -> border-radius');
+    expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain('A single unrecognised key invalidates the whole block');
+  });
+
   it('keeps the user request last', () => {
     const prompt = buildTransmissionPrompt('마지막 요청', [citation({ styleFacts: FACTS })]);
     expect(prompt.endsWith('User request:\n마지막 요청')).toBe(true);

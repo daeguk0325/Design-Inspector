@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Checkout — Design Inspector capture probe</title>
+<style>
+  :root {
+    --brand: #3884ff;
+    --ink: #1e1e1e;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --surface: #ffffff;
+    --canvas: #f7f8fa;
+    --ok: #0f9d58;
+    --warn: #b45309;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px;
+    background: var(--canvas); color: var(--ink);
+    font: 400 14px/1.55 Pretendard, "Apple SD Gothic Neo", system-ui, sans-serif;
+  }
+  header.nav { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+  header.nav .brand { font-weight: 700; font-size: 15px; }
+  main { max-width: 720px; }
+  .panel {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; padding: 20px; margin-bottom: 16px;
+  }
+  .row { display: flex; align-items: center; gap: 8px; }
+
+  /* (1) the component under test */
+  .btn-primary {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 12px 16px;
+    background: var(--brand); color: var(--ink);
+    border: 0; border-radius: 8px;
+    font: 600 14px/1.55 Pretendard, system-ui, sans-serif;
+    cursor: pointer;
+  }
+  /* (2) deliberately different, so a mis-attributed cell is detectable */
+  .btn-ghost {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 10px 14px;
+    background: transparent; color: var(--brand);
+    border: 1px solid var(--brand); border-radius: 6px;
+    font: 500 13px/1.5 Pretendard, system-ui, sans-serif;
+  }
+  .badge {
+    display: inline-flex; align-items: center;
+    padding: 4px 10px; border-radius: 999px;
+    background: #fff4e5; color: var(--warn);
+    font: 600 12px/1.4 Pretendard, system-ui, sans-serif;
+  }
+  .stat { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: #f0fdf4; }
+  .stat b { font-size: 20px; color: var(--ok); }
+  .stat span { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+  <header class="nav">
+    <span class="brand">Market</span>
+    <span class="badge">무료배송</span>
+  </header>
+  <main>
+    <div class="panel">
+      <h1 style="font:700 20px/1.4 Pretendard,system-ui;margin:0 0 12px">주문 확인</h1>
+      <div class="row">
+        <button class="btn-primary" id="cta" data-testid="checkout-cta">주문하기</button>
+        <button class="btn-ghost" id="cancel" data-testid="checkout-cancel">취소</button>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="stat" id="total" data-testid="order-total">
+        <b>₩48,000</b>
+        <span>총 결제 금액</span>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

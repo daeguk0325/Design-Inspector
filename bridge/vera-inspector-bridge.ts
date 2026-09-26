@@ -155,7 +155,12 @@ const STYLE_FACT_PROPS: readonly string[] = [
  * whole point. Omitting defaults is what leaves only the surprising values.
  */
 const STYLE_FACT_DEFAULTS: Readonly<Record<string, string>> = {
-  'background-color': 'rgba(0, 0, 0, 0)',
+  // background-color is deliberately ABSENT. A transparent background is not
+  // noise: it is why a ghost button reads as a ghost button, and it is the
+  // answer to "what is behind this text?". Filtering rgba(0,0,0,0) as a
+  // default was tried and reverted — a real 9B run over a real page then had to
+  // answer "버튼 2 배경색 확인 불가" for a button whose background was plainly
+  // knowable, i.e. the filter manufactured a gap in the evidence.
   'border-top-color': 'rgb(0, 0, 0)',
   'border-right-color': 'rgb(0, 0, 0)',
   'border-bottom-color': 'rgb(0, 0, 0)',
@@ -163,8 +168,10 @@ const STYLE_FACT_DEFAULTS: Readonly<Record<string, string>> = {
   'outline-color': 'rgb(0, 0, 0)',
   'caret-color': 'auto',
   'color': 'rgb(0, 0, 0)',
-  fill: 'none',
-  stroke: 'none',
+  // The CSS initial value for fill/stroke is `black`, not `none`. Getting this
+  // wrong put a meaningless `fill: rgb(0, 0, 0)` on every HTML element.
+  fill: 'rgb(0, 0, 0)',
+  stroke: 'rgb(0, 0, 0)',
   'font-style': 'normal',
   'letter-spacing': 'normal',
   'word-spacing': 'normal',
@@ -195,6 +202,7 @@ const STYLE_FACT_DEFAULTS: Readonly<Record<string, string>> = {
   visibility: 'visible',
   opacity: '1',
   'animation-name': 'none',
+  'transition-duration': '0s',
   transform: 'none',
   filter: 'none',
 };
@@ -202,11 +210,26 @@ const STYLE_FACT_DEFAULTS: Readonly<Record<string, string>> = {
 /**
  * `0px` is only unremarkable where zero length is the initial value. Padding is
  * deliberately absent: "this component has no padding" is a finding.
+ * `word-spacing` is here too: its initial value is `normal`, but every engine
+ * reports `0px` in practice and the two are indistinguishable to a reader.
  */
 const STYLE_FACT_ZERO_DEFAULT_PROPS: ReadonlySet<string> = new Set([
   'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
   'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
+  'word-spacing',
 ]);
+
+/**
+ * These have `currentColor` as their CSS initial value, so getComputedStyle
+ * resolves them to the element's own text colour. A computed value equal to
+ * `color` therefore means "not authored", and it is already implied by the
+ * colour we do report. Found by capturing a real page: four of these plus
+ * outline and caret were ~40% of every record's noise.
+ */
+const STYLE_FACT_CURRENT_COLOR_PROPS: readonly string[] = [
+  'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color',
+  'outline-color', 'caret-color',
+];
 
 /** A unit is optional: `0`, `0px`, `0.0em` and `0%` are all zero lengths. */
 const STYLE_FACT_ZERO_LENGTH = /^0(?:\.0+)?(?:px|em|rem|%|pt|ch|vh|vw|vmin|vmax)?$/;
@@ -407,6 +430,20 @@ export function collectStyleFacts(el: Element): StyleFacts | undefined {
   const label = collectLabel(el);
   const ancestors = collectAncestors(el);
   const tagName = styleTagName(el);
+
+  // Drop the currentColor echoes now that `color` has been resolved. `color` is
+  // the first property in the list, so it is already decided by this point; if
+  // it was itself a default then these were too.
+  const textColor = props['color'];
+  if (textColor !== undefined) {
+    for (const property of STYLE_FACT_CURRENT_COLOR_PROPS) {
+      const value = props[property];
+      if (value === undefined || !sameStyleValue(value, textColor)) continue;
+      delete props[property];
+      count -= 1;
+    }
+  }
+
   if (count === 0 && geometry === null && label === null && ancestors.length === 0 && tagName === null) {
     return undefined;
   }

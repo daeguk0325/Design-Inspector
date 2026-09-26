@@ -3,11 +3,12 @@
 Date: 2026-09-26 (update: §9e style facts — measured DOM evidence in the
 transmission prompt, sRGB colour normalization, named visual-transmission failure
 reasons, `:cloud` disclosure).
-Method: `npx tsc -b` (clean) + `npx vitest run` (37 files, 622 tests, all
+Method: `npx tsc -b` (clean) + `npx vitest run` (37 files, 626 tests, all
 passing) + `npm run lint` (0 errors; 12 pre-existing warnings) + `npm run build` +
 real Vera/Launcher/Supervisor E2E + isolated Edge CDP crop/Ollama-payload E2E +
 real-key composer E2E + a 4-arm A/B against a real local 9B vision model
-(see "Live 9B A/B verification") + code-trace against the §20.15 and §23
+(see "Live 9B A/B verification") + a real-capture run over the production contact-sheet + crop payload
+(see "Live real-capture verification") + code-trace against the §20.15 and §23
 checklists.
 A real installed vision model remains a manual environment-specific follow-up for
 the full capture path; the §9e prompt/evidence change is verified above.
@@ -277,6 +278,121 @@ sends a contact sheet (640px cells) plus individual crops under a 2.8M base64
 budget; this probe is a single 480×220 / 2.6 KB image. Capture itself is covered
 by the existing E2E evidence above.
 
+## Live real-capture verification (§9e production payload, 2026-09-26)
+
+The 4-arm run above used a hand-made 480×220 probe. The app does not send that: it
+sends a **contact sheet** (2 columns, 640px cells, numbered captions) plus an
+individual crop per selection, all from real html2canvas captures. That path is
+verified here against a real browser.
+
+Harness: `scripts/capture-probe-e2e.mjs` + `scripts/capture-probe-target.html`.
+
+- Chrome (headless) driven over CDP via `ws`; no new dependency
+- The target is served in an **iframe** on a separate origin, the production
+  topology
+- The Bridge is injected using the proxy's own
+  `getInspectorBridgeArtifact()` — the real bridge, the real html2canvas
+  capture, the real `collectStyleFacts`
+- The contact sheet is built by the real `buildContactSheet()`, transpiled the
+  same way the proxy transpiles the Bridge, and run **in the page** because it
+  needs a DOM canvas
+- Clicks are real `Input.dispatchMouseEvent`, not synthetic events
+- 3 components: a filled button, a ghost button, and a text node
+
+Real measurements that came back, e.g. the ghost button:
+
+```
+color rgb(56,132,255) · background transparent · padding 10px 14px
+border 1px solid · radius 6px · display flex · align-items center · gap 8px
+geometry 56x42 at 141,144 · capture 112x84 PNG
+```
+
+Payload actually sent: **4 images, 46KB total** (30KB sheet + 3 crops), well
+inside the 2.8MB budget.
+
+### Three defects this found that the jsdom fixtures could not
+
+**1. The default table was wrong, and ~40% of every record was noise.** The
+fixtures fed exact values, so a wrong default looked right. Against a real page:
+
+- `fill`/`stroke` have CSS initial value `black`, not `none` — so every HTML
+  element reported `fill: rgb(0, 0, 0)`
+- `transition-duration: 0s` was reported on every element (initial is `0s`)
+- `word-spacing: 0px` likewise
+- `border-*-color`, `outline-color` and `caret-color` have initial value
+  `currentColor`, so getComputedStyle resolves them to the element's own text
+  colour. All six were echoing `color` on every element.
+
+Fixed by correcting the initial values and dropping currentColor echoes.
+Records went from **23 / 27 / 18** properties to **16 / 21 / 12**, and every
+remaining property is informative. Documented trade-off: when an author sets a
+border to exactly the text colour, the rule drops it as indistinguishable from
+the echo. Computed style cannot tell cause from coincidence; the width and style
+are still reported, and the colour is recoverable from `color`.
+
+**2. Filtering `rgba(0,0,0,0)` manufactured a gap in the evidence.** The earlier
+review argued a transparent background is noise on every element and should be
+omitted. Against a real page the model then had to answer:
+
+> **버튼 2 배경색 확인 불가**
+
+for a ghost button whose background was plainly knowable. The filter created the
+very uncertainty the feature exists to remove. `background-color` is no longer
+treated as a default; the model now writes `배경 투명` and the false gap is gone.
+The original judgement that it was noise was wrong, and only a real run could
+show it.
+
+**3. The facts' display shorthand leaked into the machine block.** `box=12px 16px`
+in the facts was read as a declaration key:
+
+```design-inspector-preview
+{"version":1,"rules":[{"target":2,"declarations":{"color":"rgb(255,255,255)","box":"12px 16px"}}]}
+```
+
+`validatePreviewBlock` rejected the whole rule as `unknown-property: box` — the
+safety net held and nothing corrupted — but the cost is real: **one bad key
+discards the valid declarations beside it**, including a correct colour fix. The
+system prompt now states that the facts tokens are display shorthand, not CSS
+property names, and maps them (`box -> padding`, `radius -> border-radius`, …).
+After the fix the model emits `padding` and `gap` instead of `box`.
+
+A residual echo remains in prose ("패딩을 `box=12px 16px`로 설정합니다"), which is
+harmless — it is a label in a sentence, not a machine key.
+
+### Result: the production payload does not degrade the facts
+
+| | E — facts only | F — facts + sheet + crops |
+|---|---|---|
+| components attributed correctly | 3/3 | 3/3 |
+| invented colours | none | none |
+| false "확인 불가" | none (after fix 2) | none |
+| remaining hedge | contrast **ratio** only | none |
+| preview block | rejected (`gap` is forbidden) | **valid, would auto-apply** |
+
+Both arms read the measurements, not the image. F's block applies
+`padding: 12px 16px`, `border-radius: 8px`, `background-color: rgb(56,132,255)`,
+`color: rgb(30,30,30)` — every value measured, every property inside the
+visual-only allowlist. E's block proposed `gap`, a layout property the preview
+policy deliberately refuses, and was discarded cleanly.
+
+The one claim neither arm could make is the contrast **ratio**, which is correct
+behaviour: a ratio is not a thing you read off a hex pair, you compute it.
+
+### Two harness traps, recorded so they are not repeated
+
+- **The target must be an iframe.** The Bridge sends with
+  `window.parent.postMessage`, so in a top-level test page `window.parent ===
+  window` and the Bridge receives its own HELLO_ACK and SNAPSHOT. Each bumps
+  `lastAppSequence` and silently drops the app's next command. The symptom is a
+  FREEZE that is never acknowledged, with no error message. The Bridge is
+  correct; a top-level harness is not.
+- **Match responses by `requestId`, never by type alone.** Matching on type
+  returns the *first* result of that type, so the second and third capture
+  requests silently received the first capture's payload. All three contact
+  sheet cells showed component 1. `useBridge` keys pending captures by
+  `requestId` for exactly this reason.
+
+
 ## Manual follow-up (needs a running inspected app + Ollama)
 
 A. Freeze → iframe reload → reconnect → reconciliation
@@ -334,7 +450,7 @@ Plus visual QA pass (§20.14) in a real browser.
     events, explicit port announcements can be sniffed for off-list ports, and
     process exit / occupied-port / timeout cases identify the failure in the
     launcher error state. `scripts/ports.test.mjs` covers the parser suite; the
-full repository currently passes 622 tests across 37 files.
+full repository currently passes 626 tests across 37 files.
 13. Launcher stdin contract: target children are intentionally non-interactive;
     Neutralino's stdin pipe is closed immediately after spawn. This fixes the
     Windows `tsx watch` + `require("process")` pipe deadlock without modifying
