@@ -4,6 +4,7 @@
 // OLLAMA_ORIGINS="http://127.0.0.1:5173". No dev proxy is bundled.
 
 import { OllamaStreamParser } from './streamParser.ts';
+import type { StreamBudget } from './streamParser.ts';
 import { citationMarker } from '../citationMarker.ts';
 import { formatStyleFacts } from '../style/sanitize.ts';
 import { findBoxOverlaps, formatBoxOverlaps } from '../style/relations.ts';
@@ -245,12 +246,45 @@ export async function testChatCapability(
 
 export interface ChatDoneMeta {
   truncated: boolean;
+  budget?: StreamBudget;
 }
 
 export interface ChatCallbacks {
   onToken: (t: string) => void;
   onDone: (meta: ChatDoneMeta) => void;
   onError: (msg: string) => void;
+}
+
+/**
+ * Why an answer that stopped early is reported rather than shown.
+ *
+ * A turn carrying four screenshots spends about 4200 of an 8192-token window on
+ * the prompt alone, so the budget for the reply is whatever is left over. With
+ * one earlier exchange in the history the measured prompt was 5235 tokens and
+ * the visible answer came back as 25 characters, cut mid-sentence, with a clean
+ * `done`. Nothing in the stream looked like an error: the cap was respected, the
+ * response was well-formed, the model did nothing wrong. It is the same class of
+ * silent failure as the 0-byte answer, arrived at from the other direction, so it
+ * gets the same treatment — an explanation, not a stub.
+ */
+const CUTOFF_MIN_VISIBLE_CHARS = 400;
+
+function cutoffMessage(visibleChars: number, budget: StreamBudget, settings: GenerationSettings): string | null {
+  if (budget.reason !== 'length') return null;
+  if (visibleChars >= CUTOFF_MIN_VISIBLE_CHARS) return null;
+  const room = budget.promptTokens === null ? null : settings.numCtx - budget.promptTokens;
+  const boundByContext = room !== null && budget.generatedTokens !== null && budget.generatedTokens < settings.numPredict;
+  if (boundByContext) {
+    return (
+      `컨텍스트 창이 먼저 찼습니다: 요청+이미지가 ${budget.promptTokens}토큰으로 num_ctx ${settings.numCtx}의 ` +
+      `약 ${Math.round(((budget.promptTokens ?? 0) / settings.numCtx) * 100)}%를 사용해 답이 ${visibleChars}자로 잘렸습니다. ` +
+      '설정의 컨텍스트를 높이거나 선택한 컴포넌트를 줄여주세요.'
+    );
+  }
+  return (
+    `응답이 num_predict ${settings.numPredict}토큰에서 잘렸습니다 (본문 ${visibleChars}자). ` +
+    '설정의 응답 상한을 높이거나 추론 강도를 낮춰보세요.'
+  );
 }
 
 /**
@@ -379,12 +413,55 @@ export function buildTransmissionPrompt(
   return sections.join('\n\n');
 }
 
-function toOllamaHistory(messages: ChatMessage[]): Array<{ role: string; content: string }> {
-  const recent = messages.slice(-MAX_HISTORY_MESSAGES);
-  return recent
-    .filter((m) => m.status === undefined || m.status === 'completed')
-    .map((m) => ({ role: m.role, content: m.content }));
+/**
+ * Trim history against a token estimate rather than a message count.
+ *
+ * `MAX_HISTORY_MESSAGES` counted 40 messages, which is no budget at all when a
+ * turn carries four screenshots: the measured prompt for one image turn was 4245
+ * tokens and 5235 with a single earlier exchange, against an 8192 window. The
+ * answer was cut to 25 characters with a clean `done` and nothing to indicate
+ * why. The server discards old turns silently under pressure, so the only place
+ * this can be prevented is before the request.
+ *
+ * The estimate is crude on purpose — roughly 3.5 characters per token plus a flat
+ * allowance per image — because being wrong in the safe direction costs a little
+ * history, while being wrong in the unsafe direction costs the user their answer.
+ * Anything the estimate misses is caught after the fact by the cutoff check.
+ */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 3.5);
 }
+
+const IMAGE_TOKEN_ALLOWANCE = 1_500;
+
+function toOllamaHistory(
+  messages: ChatMessage[],
+  imageCount: number,
+  settings: GenerationSettings,
+): Array<{ role: string; content: string }> {
+  const usable = messages
+    .slice(-MAX_HISTORY_MESSAGES)
+    .filter((m) => m.status === undefined || m.status === 'completed');
+  // Room for the prompt this function is only part of: the facts block, the
+  // citation list, the image descriptions, and a reply worth reading.
+  const budget = settings.numCtx - imageCount * IMAGE_TOKEN_ALLOWANCE - HISTORY_RESERVE_TOKENS;
+  const kept: Array<{ role: string; content: string }> = [];
+  let used = 0;
+  // Newest first, then reversed, so a truncated history loses the oldest turns.
+  for (let index = usable.length - 1; index >= 0; index -= 1) {
+    const message = usable[index];
+    if (message === undefined) continue;
+    const cost = estimateTokens(message.content) + ROLE_OVERHEAD_TOKENS;
+    if (used + cost > budget && kept.length > 0) break;
+    kept.push({ role: message.role, content: message.content });
+    used += cost;
+  }
+  return kept.reverse();
+}
+
+const ROLE_OVERHEAD_TOKENS = 4;
+/** For the facts block, citation list, image descriptions and a readable reply. */
+const HISTORY_RESERVE_TOKENS = 1_800;
 
 export async function streamChat(
   baseUrl: string,
@@ -412,7 +489,7 @@ export async function streamChat(
         options: controls.options,
         messages: [
           { role: 'system', content: buildSystemPrompt(history, transactions) },
-          ...toOllamaHistory(history),
+          ...toOllamaHistory(history, visual?.images.length ?? 0, generation),
           {
             role: 'user',
             content: buildTransmissionPrompt(rawRequest, citations, visual),
@@ -473,6 +550,7 @@ export async function streamChat(
       if (done) break;
     }
     parser.flush(emit);
+    const budget = parser.budget();
     // A reasoning budget that gets spent on thinking leaves nothing to show.
     // The stream ends cleanly, so without this the user watches a spinner
     // resolve into an empty bubble and cannot tell a model failure from a UI
@@ -486,7 +564,19 @@ export async function streamChat(
       );
       return;
     }
-    cb.onDone({ truncated });
+    // A short answer that stopped at a cap is not a short answer. See
+    // CUTOFF_MIN_VISIBLE_CHARS for how this was measured.
+    const cut = cutoffMessage(visible, budget, generation);
+    if (cut !== null) {
+      cb.onError(cut);
+      return;
+    }
+    // Only attached when the server said something, so the public shape of a
+    // normal completion is unchanged.
+    cb.onDone({
+      truncated,
+      ...(budget.reason === null ? {} : { budget }),
+    });
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') return;
     cb.onError(e instanceof Error ? e.message : 'Stream failed.');

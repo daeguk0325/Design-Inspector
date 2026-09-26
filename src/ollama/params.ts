@@ -16,10 +16,26 @@
 // server default, because a server default is a number nobody in this project
 // chose.
 //
-// `temperature: 0` is greedy decoding, and greedy decoding on a thinking model
-// can walk into a repetition loop. That is why `repeatPenalty` ships in the
-// same unit of work rather than as a tuning knob: dropping it to test
-// determinism in isolation is what produced the 26-times-repeated paragraph.
+// Two of these defaults were later measured to be causal, and one belief about
+// them turned out to be wrong:
+//
+//   - `temperature: 0` is what produces determinism. A fixed prompt returned
+//     byte-identical text and thinking across 5 of 5 runs with it, and 5 distinct
+//     answers out of 5 without it.
+//   - `num_ctx` defaults to 4096. A turn with four screenshots measured 4245
+//     prompt tokens, and 5235 with one earlier exchange in the history, so on a
+//     default server the request does not fit at all.
+//   - `seed` buys nothing at temperature 0. Seeds 43 through 46 produced the
+//     identical output and the identical token count, because greedy decoding
+//     never draws from the RNG. The seed is kept because it is what makes the
+//     request reproducible once the temperature is raised, not because it is what
+//     makes it reproducible today.
+//   - `repeat_penalty` is the weakest claim here. A repetition loop that ended in
+//     a 0-byte answer was observed at the server default of 1.1, and 1.15 cleared
+//     43 calls over 16 payloads — but the same failure did not reproduce at 1.0
+//     in a later run, and a thinking channel still repeated a paragraph 6 times
+//     at 1.15. It is set above the default as cheap insurance, not as a proven
+//     fix, and nothing in the product should be described otherwise.
 
 /** Reasoning effort. `off` disables the thinking channel entirely. */
 export type ThinkLevel = 'off' | 'low' | 'medium' | 'high' | 'max';

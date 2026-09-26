@@ -112,8 +112,7 @@ describe('streamChat generation controls', () => {
     vi.unstubAllGlobals();
   });
 
-  it('reports a thinking-only response as an error instead of an empty bubble', async () => {
-    // The real 0-byte failure: the reasoning budget was spent on thinking and
+  it('reports a thinking-only response as an error instead of an empty bubble', async () => {    // The real 0-byte failure: the reasoning budget was spent on thinking and
     // nothing was left to read. The stream ends cleanly, so this is the only
     // place the user could be told.
     const encoder = new TextEncoder();
@@ -142,6 +141,150 @@ describe('streamChat generation controls', () => {
     expect(done).toBe(false);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain('num_predict');
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * Reproduces the measured failure: four screenshots spent 4245 tokens of an
+   * 8192 window, one earlier exchange made it 5235, and the reply came back as
+   * 25 characters with a clean `done`. A cap respected, a well-formed response,
+   * a model that did nothing wrong — and the user gets a stub with no signal.
+   */
+  function budgetResponse(content: string, promptTokens: number, evalCount: number): Response {
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(`${JSON.stringify({ message: { content } })}\n`));
+          controller.enqueue(
+            encoder.encode(
+              `${JSON.stringify({ done: true, done_reason: 'length', prompt_eval_count: promptTokens, eval_count: evalCount })}\n`,
+            ),
+          );
+          controller.close();
+        },
+      }),
+      { status: 200 },
+    );
+  }
+
+  it('reports an answer cut off by the context window, not a short answer', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => budgetResponse('잘린 답', 5235, 2957)));
+    const errors: string[] = [];
+    let done = false;
+    await streamChat('http://localhost:11434', 'm', [], 'q', [], undefined, new AbortController().signal, {
+      onToken: () => {},
+      onDone: () => {
+        done = true;
+      },
+      onError: (msg) => errors.push(msg),
+    });
+    expect(done).toBe(false);
+    expect(errors[0]).toContain('컨텍스트');
+    // Named the cause, because the two caps have different fixes.
+    expect(errors[0]).toContain('5235');
+    vi.unstubAllGlobals();
+  });
+
+  it('reports an answer cut off by the response cap, naming that cap instead', async () => {
+    // 4096 generated against a cap of 4096: the cap was the binding constraint,
+    // so telling the user to raise the context would be the wrong advice.
+    vi.stubGlobal('fetch', vi.fn(async () => budgetResponse('잘린 답', 900, 4096)));
+    const errors: string[] = [];
+    await streamChat('http://localhost:11434', 'm', [], 'q', [], undefined, new AbortController().signal, {
+      onToken: () => {},
+      onDone: () => undefined,
+      onError: (msg) => errors.push(msg),
+    });
+    expect(errors[0]).toContain('num_predict');
+    expect(errors[0]).not.toContain('컨텍스트');
+    vi.unstubAllGlobals();
+  });
+
+  it('shows a short answer that finished on its own', async () => {
+    // A short answer is only suspicious when a cap was hit. "OK" is a complete
+    // response and must reach the user as one.
+    const encoder = new TextEncoder();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(encoder.encode(`${JSON.stringify({ message: { content: 'OK' } })}\n`));
+                controller.enqueue(encoder.encode(`${JSON.stringify({ done: true, done_reason: 'stop' })}\n`));
+                controller.close();
+              },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    let done = false;
+    await streamChat('http://localhost:11434', 'm', [], 'q', [], undefined, new AbortController().signal, {
+      onToken: () => {},
+      onDone: () => {
+        done = true;
+      },
+      onError: () => {},
+    });
+    expect(done).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('shows a long answer even when a cap was hit', async () => {
+    // The cutoff heuristic must not fire on a response that clearly arrived.
+    const long = '가'.repeat(600);
+    vi.stubGlobal('fetch', vi.fn(async () => budgetResponse(long, 800, 4096)));
+    let done = false;
+    await streamChat('http://localhost:11434', 'm', [], 'q', [], undefined, new AbortController().signal, {
+      onToken: () => {},
+      onDone: () => {
+        done = true;
+      },
+      onError: () => {},
+    });
+    expect(done).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('trims old history to a token budget, keeping the newest turns', async () => {
+    // MAX_HISTORY_MESSAGES is 40, which is no budget at all when a turn carries
+    // four screenshots. A long old history must not be what fills the window.
+    const history: ChatMessage[] = [];
+    for (let index = 0; index < 40; index += 1) {
+      history.push({
+        id: `m${index}`,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: '가'.repeat(2_000),
+        citations: [],
+        createdAt: index,
+      });
+    }
+    history.push({ id: 'latest', role: 'user', content: '가'.repeat(200), citations: [], createdAt: 99 });
+    const fetchMock = vi.fn(async () => streamingResponse(['ok']));
+    vi.stubGlobal('fetch', fetchMock);
+    await streamChat(
+      'http://localhost:11434',
+      'm',
+      history,
+      'q',
+      [],
+      undefined,
+      new AbortController().signal,
+      { onToken: () => {}, onDone: () => {}, onError: () => {} },
+      [],
+      // A small window makes the trim observable without a huge fixture.
+      { ...DEFAULT_GENERATION_SETTINGS, numCtx: 8_192 },
+    );
+    const body = readBody(fetchMock as unknown as { mock: { calls: unknown[][] } });
+    const messages = (body.messages as Array<{ role: string }>).filter((m) => m.role !== 'system');
+    expect(messages.length).toBeLessThan(40);
+    expect(messages.length).toBeGreaterThan(0);
+    // The newest turn is never the thing that gets dropped.
+    const sent = JSON.stringify(body.messages);
+    expect(sent).toContain('가'.repeat(200));
     vi.unstubAllGlobals();
   });
 });

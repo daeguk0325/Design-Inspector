@@ -13,11 +13,29 @@ export interface ChatChunk {
   message?: { content?: string; thinking?: string };
   done?: boolean;
   error?: string;
+  /**
+   * Why generation stopped. `length` means a cap was hit, and which cap matters:
+   * `num_predict` or the context window. Ollama reports the token counts on the
+   * final chunk either way, so the caller can tell "we asked for 4096 and got
+   * 4096" from "only 900 were available because the prompt filled the window".
+   */
+  done_reason?: string;
+  prompt_eval_count?: number;
+  eval_count?: number;
+}
+
+export interface StreamBudget {
+  reason: string | null;
+  promptTokens: number | null;
+  generatedTokens: number | null;
 }
 
 export class OllamaStreamParser {
   private buffer = '';
   private thinkingChars = 0;
+  private doneReason: string | null = null;
+  private promptTokens: number | null = null;
+  private generatedTokens: number | null = null;
   malformedChunks = 0;
 
   /** Whether any reasoning content arrived, regardless of what was shown. */
@@ -30,12 +48,31 @@ export class OllamaStreamParser {
     return this.thinkingChars;
   }
 
+  /**
+   * What the server said about the budget. `reason: 'length'` with a
+   * `generatedTokens` far below the requested cap means the context window, not
+   * `num_predict`, was the binding constraint — which is a different problem
+   * with a different fix, and one the user cannot see from a 25-character answer.
+   */
+  budget(): StreamBudget {
+    return {
+      reason: this.doneReason,
+      promptTokens: this.promptTokens,
+      generatedTokens: this.generatedTokens,
+    };
+  }
+
   private consume(obj: ChatChunk, onContent: (content: string) => void): void {
     if (typeof obj.message?.thinking === 'string' && obj.message.thinking) {
       this.thinkingChars += obj.message.thinking.length;
     }
     if (typeof obj.message?.content === 'string' && obj.message.content) {
       onContent(obj.message.content);
+    }
+    if (obj.done === true) {
+      if (typeof obj.done_reason === 'string') this.doneReason = obj.done_reason;
+      if (typeof obj.prompt_eval_count === 'number') this.promptTokens = obj.prompt_eval_count;
+      if (typeof obj.eval_count === 'number') this.generatedTokens = obj.eval_count;
     }
   }
 
