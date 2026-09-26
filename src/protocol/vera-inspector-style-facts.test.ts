@@ -601,11 +601,12 @@ describe('derived contrast', () => {
   it('treats a fully transparent shadow as no shadow', () => {
     // A transition or a reset leaves `rgba(0,0,0,0)` behind, which paints
     // nothing. Reporting a caveat for it would cry wolf on every element.
+    // The colour leads, which is the order getComputedStyle normalises to.
     stubComputedStyle({
       color: '#767676',
       'background-color': '#ffffff',
       'font-size': '14px',
-      'box-shadow': '0 0 0 1px rgba(0, 0, 0, 0)',
+      'box-shadow': 'rgba(0, 0, 0, 0) 0px 0px 0px 1px',
     });
     expect(derivedOf(collectStyleFacts(element()))?.contrast).not.toHaveProperty('caveat');
   });
@@ -664,6 +665,49 @@ describe('derived contrast', () => {
     setRect(label, { left: 0, top: 0, width: 120, height: 20 });
     stubComputedStyle({ color: '#767676', 'background-color': '#ffffff', 'font-size': '14px' });
     expect(derivedOf(collectStyleFacts(label))?.contrast).toMatchObject({ ratio: 4.54, pass: true });
+  });
+
+  it('does not read the tool\'s own overlay as the page overlapping itself', () => {
+    // Found in a real browser run: the freeze shield covers the page by design
+    // and elementsFromPoint reports its shadow HOST, so every element on the
+    // page came back with an overlap caveat and the signal meant nothing. The
+    // same shield-plus-host pattern hitTestPage already works around.
+    const label = element('span', 'subject');
+    const host = element('div', 'overlay-host');
+    const shield = element('div', 'freeze-shield');
+    setRect(label, { left: 0, top: 0, width: 120, height: 20 });
+    setElementsFromPoint(() => [host, label]);
+    stubComputedStyle({ color: '#767676', 'background-color': '#ffffff', 'font-size': '14px' });
+    expect(derivedOf(collectStyleFacts(label, { host, shield }))?.contrast).not.toHaveProperty('caveat');
+  });
+
+  it('still reports a real overlap past the tool chrome', () => {
+    // The shield must not become a blind spot: a page element that is genuinely
+    // on top still has to be found once the tool's own hits are filtered out.
+    const label = element('span', 'subject');
+    const host = element('div', 'overlay-host');
+    const shield = element('div', 'freeze-shield');
+    const badge = element('i', 'badge');
+    setRect(label, { left: 0, top: 0, width: 120, height: 20 });
+    setElementsFromPoint(() => [host, shield, badge, label]);
+    stubComputedStyle({ color: '#767676', 'background-color': '#ffffff', 'font-size': '14px' });
+    expect(derivedOf(collectStyleFacts(label, { host, shield }))?.contrast).toMatchObject({
+      caveat: 'overlap',
+    });
+  });
+
+  it('restores the shield pointer-events it borrowed', () => {
+    // The shield is the tool's input path. Leaving it at `none` after a
+    // measurement would make the page unclickable for the rest of the session.
+    const label = element('span', 'subject');
+    const host = element('div', 'overlay-host');
+    const shield = element('div', 'freeze-shield');
+    shield.style.pointerEvents = 'auto';
+    setRect(label, { left: 0, top: 0, width: 120, height: 20 });
+    setElementsFromPoint(() => [label]);
+    stubComputedStyle({ color: '#767676', 'background-color': '#ffffff', 'font-size': '14px' });
+    collectStyleFacts(label, { host, shield });
+    expect(shield.style.pointerEvents).toBe('auto');
   });
 
   it('names the backdrop it measured against, for the brand blue probe button', () => {

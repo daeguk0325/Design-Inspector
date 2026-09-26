@@ -46,6 +46,16 @@
     border: 1px solid var(--brand); border-radius: 6px;
     font: 500 13px/1.5 Pretendard, system-ui, sans-serif;
   }
+  /* (3) the shape that makes a contrast caveat observable. `.shadowed` carries a
+     real box-shadow, which an ancestor background walk steps straight over: it is
+     exactly what a ratio computed that way gets wrong. */
+  .shadowed {
+    display: inline-flex; align-items: center;
+    padding: 6px 10px; border-radius: 6px;
+    background: #f0fdf4; color: #0f9d58;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+    font: 600 12px/1.4 Pretendard, system-ui, sans-serif;
+  }
   .badge {
     display: inline-flex; align-items: center;
     padding: 4px 10px; border-radius: 999px;
@@ -68,6 +78,10 @@
       <div class="row">
         <button class="btn-primary" id="cta" data-testid="checkout-cta">주문하기</button>
         <button class="btn-ghost" id="cancel" data-testid="checkout-cancel">취소</button>
+        <!-- Exists to make the contrast caveat observable in a real browser:
+             a real box-shadow, which an ancestor background walk cannot see.
+             Without it the caveat can only ever be observed in the negative. -->
+        <span class="shadowed" id="shadowed" data-testid="checkout-shadowed">할인</span>
       </div>
     </div>
     <div class="panel">

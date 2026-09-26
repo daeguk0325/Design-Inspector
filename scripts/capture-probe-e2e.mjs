@@ -29,6 +29,7 @@
 
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,6 +38,8 @@ import WebSocket from 'ws';
 import ts from 'typescript';
 import { getInspectorBridgeArtifact } from './target-proxy.mjs';
 import { buildTransmissionPrompt, DESIGN_INSPECTOR_SYSTEM_PROMPT, validatePreviewBlock } from '../src/ollama/client.ts';
+import { buildChatControls, DEFAULT_GENERATION_SETTINGS } from '../src/ollama/params.ts';
+import { shouldSuppressBlock } from '../src/ollama/intent.ts';
 
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const ENDPOINT = 'http://localhost:11434';
@@ -49,7 +52,7 @@ const APP_PORT = 8731;
 const TARGET_PORT = 8734;
 const APP_ORIGIN = `http://127.0.0.1:${APP_PORT}`;
 const TARGET_ORIGIN = `http://127.0.0.1:${TARGET_PORT}`;
-const SELECTORS = ['checkout-cta', 'checkout-cancel', 'order-total'];
+const SELECTORS = ['checkout-cta', 'checkout-cancel', 'order-total', 'checkout-shadowed'];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -456,7 +459,12 @@ async function main() {
     const citations = probe.activeOrder.map((selectionId, index) => {
       const record = probe.records.find((r) => r.selectionId === selectionId);
       return {
-        selectionId,
+        // Deliberately NOT the Bridge's id. The Bridge mints a random one per
+        // capture and `buildTransmissionPrompt` embeds it, so two runs of this
+        // probe were sending the model different text and any difference in the
+        // answer was the harness rather than the model. A stability check has to
+        // hold the prompt fixed to mean anything.
+        selectionId: `sel-probe-${index + 1}`,
         elementKey: record.elementKey,
         component: record.component,
         file: record.file,
@@ -500,25 +508,37 @@ async function main() {
       await writeFile(join(OUT, `arm-${arm.id}.user.txt`), user, 'utf8');
       console.log(`\narm ${arm.id} - ${arm.note}`);
       console.log(`  request: ${arm.request}`);
-      console.log(`  prompt ${user.length} chars, images ${arm.visual ? images.length : 0}`);
+      // The prompt hash is the thing that makes a repeat run mean something: two
+      // runs with different hashes were never the same experiment, and reading
+      // the answer difference as model instability is how that got misreported.
+      console.log(
+        `  prompt ${user.length} chars sha ${createHash('sha256').update(user).digest('hex').slice(0, 12)}` +
+          `, images ${arm.visual ? images.length : 0}`,
+      );
 
       if (!RUN) continue;
+      // The controls the app actually sends, not a hand-rolled approximation of
+      // them. A probe that sends different parameters than production measures a
+      // configuration nobody ships, which is how the previous run reported a
+      // repetition loop that the shipped settings had already fixed.
+      const controls = buildChatControls(DEFAULT_GENERATION_SETTINGS);
+      // The app decides this from the request before any model output exists.
+      // Evaluated here too, or the probe would report a handoff block that the
+      // real app silently strips.
+      const suppressed = shouldSuppressBlock(arm.request);
       const started = Date.now();
       const res = await fetch(`${ENDPOINT}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: MODEL,
+          think: controls.think,
           messages: [
             { role: 'system', content: DESIGN_INSPECTOR_SYSTEM_PROMPT },
             { role: 'user', content: user, ...(arm.visual ? { images } : {}) },
           ],
           stream: false,
-          // A thinking-capable model spends part of its budget on
-          // message.thinking. Pinning num_predict low starved the visible
-          // answer to zero characters once, which looked like a model failure
-          // and was not one.
-          options: { num_predict: 12000, temperature: 0 },
+          options: controls.options,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
@@ -533,6 +553,7 @@ async function main() {
           ` -> arm-${arm.id}.answer.md`,
       );
       if (text.length === 0) console.log('  EMPTY VISIBLE ANSWER');
+      if (suppressed) console.log(`  gate: block suppressed for this request (${arm.request})`);
       results.push({ id: arm.id, text, citationNumbers: items.map((i) => i.displayNumber) });
     }
     if (results.length === 0) console.log('\n(dry run — pass --run to send to the model)');

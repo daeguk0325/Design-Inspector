@@ -356,8 +356,7 @@ describe('useChat streaming with the preview sidecar', () => {
     });
   });
 
-  it('stores the request citations on the answer, so its markers resolve', async () => {
-    const store = createStore();
+  it('stores the request citations on the answer, so its markers resolve', async () => {    const store = createStore();
     stubFetch(() => contentResponse(['## 전달문\n\n여백을 조정했습니다 ({1})\n\n']));
     const api = mountChat();
     expect(await send(api, store, 'session-a', 'make ({1}) roomier')).toBe(true);
@@ -403,8 +402,59 @@ describe('useChat streaming with the preview sidecar', () => {
     expect(onComplete.mock.calls[0]?.[0].content).toBe('## 디자이너 전달문\n\n본문 [1]\n');
   });
 
-  it('ignores malformed, invalid, and oversized machine blocks', async () => {
-    const cases: Array<[string, string]> = [
+  // The prompt tells the model not to emit a block for these two shapes and it
+  // did anyway, in about one run in three, on a real 9B. These test the app-side
+  // gate that was added because of that, end to end through the hook, because
+  // the block is stripped during streaming and there is no later stage to catch
+  // it.
+  it('strips a block the model emitted for a handoff request', async () => {
+    const store = createStore();
+    // A well-formed, valid block for a citation that exists: the model did
+    // everything right and still answered the wrong kind of question.
+    stubFetch(() => contentResponse(blockFragments(BLOCK_JSON)));
+    const api = mountChat();
+    const onComplete = vi.fn<(completion: ChatCompletion) => void>();
+    await send(api, store, 'session-a', '이거 디자이너한테 전달문 만들어줘', onComplete);
+    const assistant = lastAssistant(store, 'session-a');
+    expect(assistant.status).toBe('completed');
+    expect(assistant.content).toBe(VISIBLE);
+    expect(assistant.content).not.toContain('border-radius');
+    expect(onComplete.mock.calls[0]?.[0].candidate).toBeNull();
+  });
+
+  it('strips a block the model emitted for an explicit do-not-change', async () => {
+    const store = createStore();
+    stubFetch(() => contentResponse(blockFragments(BLOCK_JSON)));
+    const api = mountChat();
+    const onComplete = vi.fn<(completion: ChatCompletion) => void>();
+    await send(api, store, 'session-a', '색만 확인해줘. 바꾸지 마', onComplete);
+    expect(onComplete.mock.calls[0]?.[0].candidate).toBeNull();
+    expect(lastAssistant(store, 'session-a').content).toBe(VISIBLE);
+  });
+
+  it('still offers the block for a real change request', async () => {
+    // The half of the gate that matters most: a negative rule that fires on a
+    // request the user actually made would quietly stop the product working.
+    const store = createStore();
+    stubFetch(() => contentResponse(blockFragments(BLOCK_JSON)));
+    const api = mountChat();
+    const onComplete = vi.fn<(completion: ChatCompletion) => void>();
+    await send(api, store, 'session-a', '간격 16px로 바꿔줘', onComplete);
+    expect(onComplete.mock.calls[0]?.[0].candidate).toEqual(CANDIDATE);
+    expect(lastAssistant(store, 'session-a').content).toBe(VISIBLE);
+  });
+
+  it('keeps the block when a change request is phrased as a handoff too', async () => {
+    // The mixed case that decides whether a one-directional gate is safe.
+    const store = createStore();
+    stubFetch(() => contentResponse(blockFragments(BLOCK_JSON)));
+    const api = mountChat();
+    const onComplete = vi.fn<(completion: ChatCompletion) => void>();
+    await send(api, store, 'session-a', '전달문으로 정리하고 간격은 16px로 바꿔줘', onComplete);
+    expect(onComplete.mock.calls[0]?.[0].candidate).toEqual(CANDIDATE);
+  });
+
+  it('ignores malformed, invalid, and oversized machine blocks', async () => {    const cases: Array<[string, string]> = [
       ['malformed', '{"version":1,'],
       ['unknown citation', JSON.stringify({ version: 1, rules: [{ target: 9, declarations: { color: 'red' } }] })],
       [

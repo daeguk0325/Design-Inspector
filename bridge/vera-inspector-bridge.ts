@@ -659,26 +659,12 @@ function hasShadowBehind(el: Element): boolean {
       return false;
     }
     const text = (shadow ?? '').trim().toLowerCase();
-    if (text !== '' && text !== 'none') {
-      // A fully transparent shadow paints nothing, which happens from a
-      // transition or a reset. Treat it as absent.
-      const alpha = transparentShadow(text);
-      if (alpha === null || alpha > 0) return true;
-    }
+    if (text !== '' && text !== 'none' && !isInvisibleShadow(text)) return true;
     const parent: Element | null = current.parentElement;
     if (!parent) return false;
     current = parent;
   }
   return false;
-}
-
-/** The alpha of a shadow's colour, or null when it has no colour token at all. */
-function transparentShadow(shadow: string): number | null {
-  const match = /rgba?\(([^)]+)\)/.exec(shadow);
-  if (!match) return null;
-  const parts = (match[1] ?? '').split(/[,\s/]+/).filter((part) => part !== '');
-  if (parts.length < 4) return null;
-  return parseStyleNumber(parts[3] ?? '');
 }
 
 /**
@@ -687,10 +673,28 @@ function transparentShadow(shadow: string): number | null {
  * Sibling elements are invisible to the ancestor walk by construction, so a
  * badge sitting on top of a label produces a confident, wrong ratio. Sampling a
  * few interior points and asking the hit-tester what is there is the same
- * question the pointer would ask. A point that hits the text element or one of
- * its own descendants is ordinary; a point that hits a stranger is not.
+ * question the pointer would ask.
+ *
+ * The shield has to be taken out of the way first, exactly as `hitTestPage`
+ * does for click targeting. It is the tool's own element, it covers the whole
+ * page by design, and `document.elementsFromPoint` returns its shadow HOST
+ * rather than anything inside the root — so without the toggle every single
+ * element on the page reports an overlap and the caveat means nothing. The
+ * `host` reference is why the skip below cannot be a `contains` check alone.
  */
-function hasOverlapOver(el: Element): boolean {
+/**
+ * The tool's own overlay elements, which the overlap sampler has to ignore and
+ * briefly get out of the way. Supplied by the injected scope that owns them;
+ * absent in unit tests, where the same defaults (no chrome) apply.
+ */
+export interface OverlayChrome {
+  host: HTMLElement | null;
+  shield: HTMLElement | null;
+}
+
+const NO_CHROME: OverlayChrome = { host: null, shield: null };
+
+function hasOverlapOver(el: Element, chrome: OverlayChrome): boolean {
   let rect: DOMRect;
   try {
     rect = el.getBoundingClientRect();
@@ -708,21 +712,32 @@ function hasOverlapOver(el: Element): boolean {
     [rect.right - insetX, rect.bottom - insetY],
     [rect.left + rect.width / 2, rect.top + rect.height / 2],
   ];
-  for (const [x, y] of points) {
-    let hits: Element[];
-    try {
-      hits = document.elementsFromPoint(x, y);
-    } catch {
-      return false;
+  const { host, shield } = chrome;
+  const previousShield = shield === null ? null : shield.style.pointerEvents;
+  if (shield !== null) shield.style.pointerEvents = 'none';
+  try {
+    for (const [x, y] of points) {
+      let hits: Element[];
+      try {
+        hits = document.elementsFromPoint(x, y);
+      } catch {
+        return false;
+      }
+      // The tool's own chrome is not the page overlapping itself. The host is
+      // checked by identity because `elementsFromPoint` reports the host of a
+      // shadow root rather than anything inside it.
+      const page = hits.filter((hit) => host === null || (hit !== host && !host.contains(hit)));
+      const top = page[0];
+      // Nothing there, or the text's own box: unremarkable. Only a hit that is
+      // neither the element nor inside it counts, and `contains` covers both
+      // directions without a second walk.
+      if (!top || top === el || el.contains(top) || top.contains(el)) continue;
+      return true;
     }
-    const top = hits[0];
-    // Nothing there, or the text's own box: unremarkable. Only a hit that is
-    // neither the element nor inside it counts, and `contains` covers both
-    // directions without a second walk.
-    if (!top || top === el || el.contains(top) || top.contains(el)) continue;
-    return true;
+    return false;
+  } finally {
+    if (shield !== null && previousShield !== null) shield.style.pointerEvents = previousShield;
   }
-  return false;
 }
 
 /**
@@ -735,6 +750,7 @@ function hasOverlapOver(el: Element): boolean {
 function collectContrast(
   el: Element,
   computed: CSSStyleDeclaration,
+  chrome: OverlayChrome,
 ): StyleFactsContrast | { unmeasurable: true } | null {
   const text = parseStyleColorChannels(normalizeStyleColor(computed.getPropertyValue('color')) ?? '');
   if (!text || text.a === 0) return null;
@@ -767,7 +783,7 @@ function collectContrast(
   // the whole story, so re-check it by eye before acting on the verdict.
   const caveat: StyleFactsContrastCaveat | undefined = hasShadowBehind(el)
     ? 'shadow'
-    : hasOverlapOver(el)
+    : hasOverlapOver(el, chrome)
       ? 'overlap'
       : undefined;
   const verdict: StyleFactsContrast = {
@@ -832,11 +848,15 @@ function collectFontLoad(computed: CSSStyleDeclaration): 'fallback' | 'unknown' 
   }
 }
 
-function collectDerived(el: Element, computed: CSSStyleDeclaration): StyleFactsDerived | null {
+function collectDerived(
+  el: Element,
+  computed: CSSStyleDeclaration,
+  chrome: OverlayChrome = NO_CHROME,
+): StyleFactsDerived | null {
   const derived: StyleFactsDerived = {};
   let present = false;
   try {
-    const contrast = collectContrast(el, computed);
+    const contrast = collectContrast(el, computed, chrome);
     if (contrast !== null) {
       derived.contrast = contrast;
       present = true;
@@ -864,7 +884,7 @@ function collectDerived(el: Element, computed: CSSStyleDeclaration): StyleFactsD
  * of their own — the backdrop walk reads up the ancestor chain, and only when
  * the element's own background is transparent.
  */
-export function collectStyleFacts(el: Element): StyleFacts | undefined {
+export function collectStyleFacts(el: Element, chrome: OverlayChrome = NO_CHROME): StyleFacts | undefined {
   let computed: CSSStyleDeclaration;
   try {
     computed = window.getComputedStyle(el);
@@ -903,7 +923,7 @@ export function collectStyleFacts(el: Element): StyleFacts | undefined {
   const label = collectLabel(el);
   const ancestors = collectAncestors(el);
   const tagName = styleTagName(el);
-  const derived = collectDerived(el, computed);
+  const derived = collectDerived(el, computed, chrome);
 
   // Drop the currentColor echoes now that `color` has been resolved. `color` is
   // the first property in the list, so it is already decided by this point; if
@@ -1598,7 +1618,10 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
     // invalidates the facts for free.
     if (rec.mode !== 'html' || el === null) return undefined;
     try {
-      return collectStyleFacts(el);
+      // The overlay host and shield are passed in so the contrast overlap check
+      // can exclude the tool's own chrome instead of reading every element on
+      // the page as overlapped by it.
+      return collectStyleFacts(el, { host, shield });
     } catch {
       return undefined;
     }
