@@ -1,6 +1,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import type { BridgeApi } from '../hooks/useBridge.ts';
 import type { ChatCompletion } from '../hooks/useChat.ts';
 import type {
@@ -69,7 +70,10 @@ interface BridgeMock {
 interface Store {
   list: Map<string, InspectorSession>;
   currentId: string | null;
-  updateSession: ReturnType<typeof vi.fn>;
+  // Spelled out rather than ReturnType<typeof vi.fn>: vitest 4 types a bare
+  // vi.fn() as Mock<Procedure | Constructable>, which is not assignable to the
+  // concrete signature this prop takes.
+  updateSession: Mock<(id: string, patch: (session: InspectorSession) => InspectorSession) => void>;
   session: (id: string) => InspectorSession | null;
   current: () => InspectorSession | null;
   switchTo: (id: string | null) => void;

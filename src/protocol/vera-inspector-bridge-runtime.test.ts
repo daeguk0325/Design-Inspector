@@ -31,6 +31,8 @@ interface Harness {
   reset: (bindingId: string, transactionIds?: string[], requestId?: string) => BridgeMessage[];
   mark: (element: Element, selectionId?: unknown) => void;
   contractFailures: () => string[];
+  /** Restore window.parent.postMessage once the harness is finished with. */
+  release: () => void;
 }
 
 let requestCounter = 0;
@@ -46,15 +48,27 @@ function currentRouteKey(): string {
 }
 
 function createHarness(options: { styleNonce?: string } = {}): Harness {
-  const postMessage = vi.spyOn(window.parent, 'postMessage');
+  // Each harness gets its OWN postMessage capture, assigned rather than spied.
+  // Vitest 4 returns the same mock when you vi.spyOn an already-mocked method,
+  // so two harnesses in one test would otherwise share a call list and the
+  // singleton-replacement test would see the first bridge's messages through the
+  // second bridge's spy — a false failure that hides a real signal.
+  const captured: BridgeMessage[] = [];
+  const nativePostMessage = window.parent.postMessage;
+  window.parent.postMessage = ((message: unknown) => {
+    captured.push(message as BridgeMessage);
+  }) as typeof window.parent.postMessage;
   const nativePushState = window.history.pushState;
   const nativeReplaceState = window.history.replaceState;
   const bridge = initVeraInspectorBridge({ appOrigin: APP_ORIGIN, ...options });
   let connectionId = '';
   let documentGeneration = '';
   let sequence = 0;
-  const sent = (): BridgeMessage[] => postMessage.mock.calls.map((call) => call[0] as BridgeMessage);
+  const sent = (): BridgeMessage[] => [...captured];
   const typed = (type: string): BridgeMessage[] => sent().filter((message) => message.type === type);
+  const restorePostMessage = (): void => {
+    window.parent.postMessage = nativePostMessage;
+  };
   const dispatch = (type: string, payload: Record<string, unknown>, requestId: string): void => {
     sequence += 1;
     window.dispatchEvent(
@@ -132,6 +146,9 @@ function createHarness(options: { styleNonce?: string } = {}): Harness {
       }
       return failures;
     },
+    release() {
+      restorePostMessage();
+    },
   };
   liveHarnesses.push(harness);
   return harness;
@@ -185,14 +202,22 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  for (const harness of liveHarnesses) {
+  // Snapshot first: the destroy loop clears liveHarnesses on failure, and the
+  // release loop must still see every harness that installed a capture.
+  const harnesses = [...liveHarnesses];
+  liveHarnesses = [];
+  for (const harness of harnesses) {
     try {
       harness.bridge.destroy();
     } catch {
-      liveHarnesses = [];
+      // A throwing destroy is the condition under test elsewhere; keep going.
     }
   }
-  liveHarnesses = [];
+  // Reverse order: the last harness installed holds the previous harness's
+  // capture as its "native" reference, not the real method.
+  for (const harness of [...harnesses].reverse()) {
+    harness.release();
+  }
   vi.restoreAllMocks();
   document.body.innerHTML = '';
   document.head.querySelectorAll('[data-vera-inspector]').forEach((node) => node.remove());
@@ -927,6 +952,16 @@ describe('bridge destroy', () => {
         (message) => message.connectionId === first.bridge.connectionId,
       ),
     ).toEqual([]);
+    // The decisive one. Each harness captures its own postMessage, so the
+    // assertion above cannot fail just from sharing a spy — what actually
+    // proves the first Bridge was torn down is that it went SILENT: a live
+    // duplicate would still be listening on the same window events.
+    const firstCountAfterReplace = first.sent().length;
+    second.dispatch('VERA_INSPECTOR_PING', {}, nextRequestId('second-ping'));
+    second.freeze(false);
+    window.history.pushState({}, '', '/singleton-2');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(first.sent()).toHaveLength(firstCountAfterReplace);
   });
 });
 
