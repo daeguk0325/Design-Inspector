@@ -479,9 +479,38 @@ the one place where a local-only app transmits data off-box, and it is a
 disclosure rather than a block — revisit it if a remote endpoint is ever
 configured.
 
-`font-family` is a **new** disclosure surface: installed font names were not in
-the prompt before §9e. Harmless against a local Ollama, worth reviewing before
-any remote model is configured.
+`font-family` is worth calling out for a different reason than the other values:
+it answers the first question any design review asks ("what font is this?"), and
+installed font names are a weak signal — an OS font list, not user data. The
+honest framing of §9e's exposure is the mechanism, not this one property: **every
+send transmits target-derived text regardless of whether the model can see
+images**, because the facts block is unconditional. Against a loopback Ollama
+that is not a concern. Before configuring any remote endpoint, that property
+becomes the one to reconsider, along with the `:cloud` disclosure above.
+
+### The focus hint is a deterministic heuristic, not a router
+
+When the request text matches the keyword table in `FOCUS_HINTS`, the prompt
+carries one line naming the attribute groups the question is about. It matches on
+colour, typography, box, layout and motion vocabulary in Korean and English.
+
+What it is not:
+
+- **Not a classifier.** An abstract or mixed request ("이거 괜찮아?") matches
+  nothing and no hint is emitted. That is the intended behaviour — a wrong hint
+  would pull the model toward attributes the user did not ask about.
+- **Not model-based routing.** The original plan called for a hybrid that has the
+  model classify the request first and route on that. It is deliberately **not
+  implemented**: a second inference per send doubles latency on a local model and
+  adds a new failure mode (what does the send do when the routing call fails?).
+  A 20-line deterministic map with tests is the honest trade at this model size.
+  Revisit if a cheaper signal becomes available, or if the model is fast enough
+  that a second call is invisible.
+
+The measured effect of the wider prompt rewrite is in `VERIFICATION_REPORT.md`
+("Live 9B A/B verification"): it removed invented values and cut the answer by
+3.5×, but did **not** achieve the intended 1–2 sections for a narrow question.
+That instruction needs its own work.
 
 ### Testing note
 

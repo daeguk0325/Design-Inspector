@@ -6,10 +6,11 @@ reasons, `:cloud` disclosure).
 Method: `npx tsc -b` (clean) + `npx vitest run` (37 files, 622 tests, all
 passing) + `npm run lint` (0 errors; 12 pre-existing warnings) + `npm run build` +
 real Vera/Launcher/Supervisor E2E + isolated Edge CDP crop/Ollama-payload E2E +
-real-key composer E2E + code-trace against the §20.15 and §23 checklists.
-A real installed vision model remains a manual environment-specific follow-up,
-and the before/after comparison of "colour cannot be verified" against exact hex
-values is part of that same follow-up: it needs the 9B model to actually run.
+real-key composer E2E + a 4-arm A/B against a real local 9B vision model
+(see "Live 9B A/B verification") + code-trace against the §20.15 and §23
+checklists.
+A real installed vision model remains a manual environment-specific follow-up for
+the full capture path; the §9e prompt/evidence change is verified above.
 
 ## Automated results
 
@@ -184,12 +185,106 @@ clear, session/URL leak guards, chat-capability test, bounded context, guarded
 streaming races, deterministic AI-free export, allow-listed runtime-only CSS
 preview with per-transaction undo — all implemented and covered by tests.
 
+
+## Live 9B A/B verification (§9e measured evidence, 2026-09-26)
+
+Executed against a real local model, not a mock.
+
+- Model: `hf.co/TaichuAI/ZDTaichu5.0-9B-GGUF:Q8_0`, `capabilities: [tools, thinking, completion, vision]`
+- Harness: `scripts/style-facts-ab.mjs` builds the arms from the **real** `buildTransmissionPrompt` and `DESIGN_INSPECTOR_SYSTEM_PROMPT`; `scripts/style-facts-run.mjs` sends them and evaluates mechanically
+- Request: `이 버튼의 색상 대비가 충분한지 확인하고, 스페이싱을 정리해줘.`
+- Facts: `box=12px 16px  radius=8px  color=#1e1e1e  bg=#3884ff  font=600 14px/1.55 Pretendard`, `at 24,180 120x40`, `style=display:inline-flex, align-items:center, gap:8px`
+- Image: `vision-probe.png`, 480×220
+- `temperature: 0`, `num_predict: 4000`
+
+Each arm differs from its pair in exactly one variable, and the pass criteria were
+declared before any inference ran.
+
+| Arm | system prompt | facts | image | Result |
+|---|---|---|---|---|
+| A | new | yes | no | **5/5 PASS** — 15.2s, 326 chars |
+| B | new | no | yes | control, failure mode reproduced — 15.1s, 307 chars |
+| C | new | yes | yes | **3/3 PASS** — 28.2s, 548 chars |
+| D | pre-§9e (verbatim) | yes | no | mixed — 23.0s, 1154 chars |
+
+### A vs B — the §9e claim, confirmed
+
+The image alone yielded **nothing**. Arm B extracted zero hex values and zero px
+values from a 480×220 crop and answered `background-color: 확인 불가 (측정값 없음)`.
+Arm A, given the same evidence as text, produced all of `#3884ff`, `#1e1e1e`,
+`12px × 16px`, `8px` and invented no colour outside the facts. This is the exact
+failure the feature set out to remove.
+
+Arm B also emitted a machine block containing a non-CSS string:
+
+```design-inspector-preview
+{"version":1,"rules":[{"target":1,"declarations":{"background-color":"확인 불가"}}]}
+```
+
+`isCssValueValid` rejects it, so it is a no-op rather than a corrupted preview —
+but it shows the model will fill a machine block it has no evidence for.
+
+### C vs A — measurements hold against the image
+
+With the image attached, the model still answered from the measurements: same
+hex pair, same `12px 16px`, same `8px`, and `14px` (the measured font size). No
+other background was claimed. The "if a number conflicts with an image, follow the
+number" rule did not need to fire, because the image was too small to offer a
+competing value — this arm shows the image does not *distract*, not that the
+conflict clause is exercised.
+
+### A vs D — the prompt rewrite, honestly mixed
+
+| | A (new) | D (pre-§9e) |
+|---|---|---|
+| sections emitted | 3 | 4 |
+| length | 326 chars | 1154 chars (3.5×) |
+| values not in the facts | none | `24px`, `gap: 12px` |
+| raw ```css block | no | yes |
+| claim about contrast | `확인 불가` (scoped, correct) | "충분할 것으로 판단됩니다" (unmeasured) |
+
+The rewrite removed the invented values, removed the fabricated WCAG claim, and
+cut the length by 3.5×. **It did not achieve the stated goal of 1–2 sections for
+a narrow question** — 4 became 3, and §3 survived as a restatement of the
+measured values (`box: 12px 16px`, `gap: 8px`) rather than guidance. That
+instruction is not doing what it claims and should be revisited.
+
+Arm A's single use of "확인 불가" was correctly scoped to the contrast **ratio**,
+which genuinely cannot be read off a hex pair without computing it. The first run
+of this verification flagged it as a failure; the criterion was wrong, not the
+model, and was corrected to test whether a hedge is attached to a *measured*
+attribute. Recorded here because the correction is part of the result.
+
+### Two methodology errors found and fixed during this run
+
+1. `num_predict: 1200` truncated arms C and D mid-`thinking` — arm C returned
+   **zero characters**. Both were unmeasurable, not wrong. All four arms were
+   re-run at 4000.
+2. The hedge criterion flagged any occurrence of "확인 불가" anywhere in the
+   answer, which fails the correctly-scoped use the system prompt explicitly asks
+   for. Narrowed to hedges adjacent to a measured attribute.
+
+### Known artifact
+
+Arm C's §2 restated the raw facts line nearly verbatim, including
+`label="주문하기"` and the ancestor chain. The model can parrot the evidence block
+instead of interpreting it. Acceptable at 9B; worth watching at larger sizes.
+
+### Limitation of this verification
+
+It validates the **prompt and evidence change**, not the capture path. The app
+sends a contact sheet (640px cells) plus individual crops under a 2.8M base64
+budget; this probe is a single 480×220 / 2.6 KB image. Capture itself is covered
+by the existing E2E evidence above.
+
 ## Manual follow-up (needs a running inspected app + Ollama)
 
 A. Freeze → iframe reload → reconnect → reconciliation
 B. React remount reselect identity
 C. Send with a real installed Ollama Vision model → inspect image-token cost and
-   response quality (and observe a real model emitting a valid preview block)
+   response quality (and observe a real model emitting a valid preview block).
+   Partially covered by the 4-arm run above; still open for the real contact-sheet
+   + crop payloads, which that run did not exercise.
 D. Freeze OFF export clearing
 G/H. Stop/Retry/session-switch races against a live model
 I. Context-limit behavior
