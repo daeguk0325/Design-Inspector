@@ -10,7 +10,7 @@ import {
   validatePreviewBlock,
 } from './client.ts';
 import type { ChatDoneMeta } from './client.ts';
-import type { CitationSnapshot } from '../state/models.ts';
+import type { ChatMessage, CitationSnapshot } from '../state/models.ts';
 import type { StyleFacts } from '../protocol/types.ts';
 import { VISUAL_ONLY_CSS_PROPERTIES } from '../preview/cssPolicy.ts';
 
@@ -288,6 +288,34 @@ describe('preview sidecar exported from client.ts', () => {
 });
 
 describe('buildSystemPrompt', () => {
+  function decided(content: string): ChatMessage {
+    return {
+      id: 'a', role: 'assistant', content,
+      citations: [], pinned: false, pinnedAt: null,
+      status: 'completed', decision: 'accepted', createdAt: 1,
+    };
+  }
+
+  it('injects the accepted handoff, not the head of the answer', () => {
+    // Regression: with §9e answers that quote the evidence block, taking the
+    // first 800 characters fed the next turn a wall of CSS, so Accept had no
+    // effect on anything the model cared about.
+    const prompt = buildSystemPrompt([decided([
+      '## 디자이너 전달문',
+      '무료 배송 날짜를 명확히 하겠습니다.',
+      '',
+      '## UI/UX 근거',
+      `padding-top:0px ${'x'.repeat(900)}`,
+    ].join('\n'))]);
+    expect(prompt).toContain('[accepted] 무료 배송 날짜를 명확히 하겠습니다.');
+    expect(prompt).not.toContain('padding-top:0px');
+  });
+
+  it('falls back to the answer head when there is no delivery section', () => {
+    const prompt = buildSystemPrompt([decided('그냥 본문뿐인 답변입니다.')]);
+    expect(prompt).toContain('[accepted] 그냥 본문뿐인 답변입니다.');
+  });
+
   it('keeps bounded design decisions outside the rolling history window', () => {
     const prompt = buildSystemPrompt([
       {

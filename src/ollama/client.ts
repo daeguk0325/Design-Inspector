@@ -71,12 +71,33 @@ Optional machine block (live preview hints):
 
 const MAX_DECISIONS = 24;
 const MAX_DECISION_CHARS = 800;
+const DELIVERY_HEADING = '## 디자이너 전달문';
+
+/**
+ * What "Accept" means is "this handoff was accepted", so the next turn should
+ * carry the handoff — not the top of the answer. Taking the head of the message
+ * was wrong once answers began quoting the evidence block: the first 800
+ * characters were a CSS dump, so accepting an answer fed the model a wall of
+ * `padding-top:0px` and the decision had no effect on anything.
+ */
+export function decisionSummary(content: string): string {
+  const flat = content.replace(/\s+/g, ' ').trim();
+  const start = flat.indexOf(DELIVERY_HEADING);
+  if (start >= 0) {
+    const rest = flat.slice(start + DELIVERY_HEADING.length);
+    // The delivery message runs until the next '## ' section.
+    const next = rest.search(/## [^#]/);
+    const body = (next >= 0 ? rest.slice(0, next) : rest).trim();
+    if (body.length > 0) return body.slice(0, MAX_DECISION_CHARS);
+  }
+  return flat.slice(0, MAX_DECISION_CHARS);
+}
 
 export function buildSystemPrompt(history: readonly ChatMessage[]): string {
   const decisions = history
     .filter((message) => message.role === 'assistant' && message.decision)
     .slice(-MAX_DECISIONS)
-    .map((message) => `- [${message.decision}] ${message.content.replace(/\s+/g, ' ').trim().slice(0, MAX_DECISION_CHARS)}`);
+    .map((message) => `- [${message.decision}] ${decisionSummary(message.content)}`);
   if (decisions.length === 0) return DESIGN_INSPECTOR_SYSTEM_PROMPT;
   return `${DESIGN_INSPECTOR_SYSTEM_PROMPT}\n\nUser design decisions for this session (preferences, not visual evidence):\n${decisions.join('\n')}`;
 }

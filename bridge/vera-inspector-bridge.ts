@@ -276,6 +276,54 @@ function sameStyleValue(left: string, right: string): boolean {
     right.toLowerCase().replace(STYLE_FACT_WHITESPACE, ' ');
 }
 
+/**
+ * `getComputedStyle` returns the whole resolved fallback stack. Reporting it
+ * verbatim is noise: a measured run showed
+ * `ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", …` costing 95
+ * characters — 14% of one component's whole evidence block — and the model
+ * quoting it back instead of reasoning about it. The first entry is what the
+ * author asked for, which is the part a design review is about.
+ */
+function meaningfulFontFamily(value: string): string {
+  const first = value.split(',')[0]?.trim() ?? '';
+  return first.length > 0 && first.length <= 64 ? first : value;
+}
+
+/**
+ * A shadow whose every layer is fully transparent draws nothing. A real
+ * component carried three such layers — 100 characters, 15% of its evidence
+ * block, all of it invisible.
+ */
+function isInvisibleShadow(value: string): boolean {
+  // Split on the separators between layers only, never on a comma inside a
+  // function's argument list.
+  const layers = value.split(/,(?![^(]*\))/);
+  if (layers.length === 0) return false;
+  const functional = /^rgba?\([^)]*\)|^hsla?\([^)]*\)|^color\([^)]*\)/i;
+  return layers.every((rawLayer) => {
+    const layer = rawLayer.trim();
+    if (layer.length === 0) return false;
+    // A layer with no explicit colour uses currentColor, which is opaque for
+    // our purposes — it draws something.
+    const colour = layer.match(functional);
+    if (colour !== null) {
+      const text = colour[0];
+      if (/^transparent$/i.test(text)) return true;
+      if (/^color\(/i.test(text)) return false;
+      const parts = text.slice(text.indexOf('(') + 1, -1).split(/[,/]/);
+      // rgb()/hsl() without an alpha component is fully opaque.
+      if (parts.length < 4) return false;
+      const alpha = (parts[3] ?? '').trim();
+      if (alpha === '') return false;
+      const numeric = alpha.endsWith('%') ? Number.parseFloat(alpha) / 100 : Number.parseFloat(alpha);
+      return Number.isFinite(numeric) && numeric === 0;
+    }
+    if (/(?:^|[\s(,])transparent(?=[\s,)]|$)/i.test(layer)) return true;
+    if (/^#[0-9a-f]{3,8}$/i.test(layer)) return false;
+    return false;
+  });
+}
+
 /** A 1x1 canvas is the only reliable way to get sRGB bytes out of oklch(). */
 function canvasColorToHex(value: string): string | null {
   try {
@@ -324,6 +372,9 @@ const STYLE_FACT_COLOR_PROPS: ReadonlySet<string> = new Set([
   'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color',
   'outline-color', 'caret-color', 'fill', 'stroke',
 ]);
+
+/** Reported as the first family only — see meaningfulFontFamily. */
+const STYLE_FACT_FAMILY_PROPS: ReadonlySet<string> = new Set(['font-family']);
 
 function styleTagName(el: Element): string | null {
   let tag = '';
@@ -418,9 +469,12 @@ export function collectStyleFacts(el: Element): StyleFacts | undefined {
     const fallback = STYLE_FACT_DEFAULTS[property];
     if (fallback !== undefined && sameStyleValue(cleaned, fallback)) continue;
     if (STYLE_FACT_ZERO_DEFAULT_PROPS.has(property) && STYLE_FACT_ZERO_LENGTH.test(cleaned)) continue;
+    if (property === 'box-shadow' && isInvisibleShadow(cleaned)) continue;
     const value = STYLE_FACT_COLOR_PROPS.has(property)
       ? normalizeStyleColor(cleaned)
-      : cleaned;
+      : STYLE_FACT_FAMILY_PROPS.has(property)
+        ? meaningfulFontFamily(cleaned)
+        : cleaned;
     if (value === null) continue;
     if (Object.hasOwn(props, property)) continue;
     props[property] = value;
