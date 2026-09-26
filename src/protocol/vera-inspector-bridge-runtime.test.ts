@@ -624,6 +624,8 @@ describe('preview apply', () => {
       { position: 'absolute' },
       { display: 'none' },
       { 'z-index': '5' },
+      { 'flex-direction': 'column' },
+      { 'grid-template-columns': '1fr 1fr' },
       { color: 'red;' },
       { color: 'red}body{display:none' },
       { '--custom-property': 'red' },
@@ -1041,6 +1043,201 @@ describe('style facts on the wire', () => {
     const record = harness.typed('VERA_INSPECTOR_SELECTION').at(-1)?.payload['record'];
     expect(record).toMatchObject({ mode: 'konva' });
     expect(record).not.toHaveProperty('styleFacts');
+    expect(harness.contractFailures()).toEqual([]);
+  });
+});
+
+function overlayHost(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-vera-inspector="overlay-host"]');
+}
+
+function shieldElement(): HTMLElement | null {
+  return overlayHost()?.shadowRoot?.querySelector<HTMLElement>('[data-vera-inspector="freeze-shield"]') ?? null;
+}
+
+function freezeStyleSheets(): HTMLStyleElement[] {
+  return [...document.querySelectorAll<HTMLStyleElement>('style[data-vera-inspector="freeze-style"]')];
+}
+
+function freezeState(harness: Harness): unknown {
+  harness.dispatch('VERA_INSPECTOR_REQUEST_SNAPSHOT', {}, nextRequestId('frozen-state'));
+  return harness.typed('VERA_INSPECTOR_SNAPSHOT').at(-1)?.payload['inspectorFrozen'];
+}
+
+function flushFrames(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
+}
+
+describe('freeze inert state', () => {
+  it('arms a pointer shield and a frozen stylesheet, and takes both down on unfreeze', () => {
+    const harness = createHarness();
+    harness.hello();
+    expect(shieldElement()).not.toBeNull();
+    expect(shieldElement()?.style.pointerEvents).toBe('none');
+    expect(freezeStyleSheets()).toHaveLength(0);
+
+    harness.freeze(true);
+    // The shield sits inside the pointer-events:none host and opts only itself
+    // back in, so the page stops receiving pointer events entirely.
+    expect(shieldElement()?.style.pointerEvents).toBe('auto');
+    expect(freezeState(harness)).toBe(true);
+    const sheets = freezeStyleSheets();
+    expect(sheets).toHaveLength(1);
+    const css = sheets[0]?.textContent ?? '';
+    expect(css).toContain('animation-play-state: paused');
+    expect(css).toContain('transition: none');
+    expect(css).toContain('caret-color: transparent');
+
+    harness.freeze(false);
+    expect(shieldElement()?.style.pointerEvents).toBe('none');
+    expect(freezeState(harness)).toBe(false);
+    expect(freezeStyleSheets()).toHaveLength(0);
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('keeps the page from receiving clicks while frozen and hands them back on unfreeze', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountElement('click-target');
+    const onClick = vi.fn();
+    target.addEventListener('click', onClick);
+
+    harness.freeze(true);
+    target.click();
+    target.click();
+    expect(onClick).not.toHaveBeenCalled();
+
+    harness.freeze(false);
+    target.click();
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('blocks typing, editing and paste but keeps the freeze shortcut and Escape live', () => {
+    const harness = createHarness();
+    harness.hello();
+    harness.freeze(true);
+    const field = mountElement('text-field', 'input') as HTMLInputElement;
+    const onKeyDown = vi.fn();
+    const onInput = vi.fn();
+    const onPaste = vi.fn();
+    const onFocusIn = vi.fn();
+    field.addEventListener('keydown', onKeyDown);
+    field.addEventListener('input', onInput);
+    field.addEventListener('paste', onPaste);
+    field.addEventListener('focusin', onFocusIn);
+
+    field.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }));
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    field.dispatchEvent(new Event('paste', { bubbles: true }));
+    field.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    expect(onKeyDown).not.toHaveBeenCalled();
+    expect(onInput).not.toHaveBeenCalled();
+    expect(onPaste).not.toHaveBeenCalled();
+    expect(onFocusIn).not.toHaveBeenCalled();
+
+    field.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'F', shiftKey: true, ctrlKey: true, bubbles: true }),
+    );
+    expect(freezeState(harness)).toBe(false);
+    expect(freezeStyleSheets()).toHaveLength(0);
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('blurs whatever held focus when the freeze arms', () => {
+    const harness = createHarness();
+    harness.hello();
+    const field = mountElement('focus-target', 'input') as HTMLInputElement;
+    field.focus();
+    expect(document.activeElement).toBe(field);
+
+    harness.freeze(true);
+    expect(document.activeElement).not.toBe(field);
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('leaves scrolling alone so off-screen components stay reachable', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountElement('scroll-target');
+    const onWheel = vi.fn();
+    target.addEventListener('wheel', onWheel);
+    const onScroll = vi.fn();
+    window.addEventListener('scroll', onScroll);
+
+    harness.freeze(true);
+    target.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true }));
+    window.dispatchEvent(new Event('scroll'));
+    expect(onWheel).toHaveBeenCalledTimes(1);
+    expect(onScroll).toHaveBeenCalledTimes(1);
+    window.removeEventListener('scroll', onScroll);
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('still hovers and selects through the shield instead of losing the pointer', async () => {
+    const harness = createHarness();
+    harness.hello();
+    harness.freeze(true);
+    const target = mountElement('shielded-target', 'section');
+    // jsdom reports an all-zero rect, and the bridge skips zero-size overlays.
+    vi.spyOn(target, 'getBoundingClientRect').mockReturnValue({
+      left: 12,
+      top: 34,
+      width: 120,
+      height: 40,
+    } as DOMRect);
+
+    // Regression guard for the hit-test rewrite: the shield retargets events to
+    // the host, so hover must resolve the real element by coordinates.
+    target.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 12, clientY: 34 }));
+    await flushFrames();
+    const hoverBox = overlayHost()?.shadowRoot?.querySelector<HTMLElement>('.vi-hover');
+    expect(hoverBox).not.toBeNull();
+    // The box carries the hovered element's own geometry, which only holds if
+    // the hit test resolved `target` and not the shield or the host.
+    expect(hoverBox?.style.width).toBe('120px');
+    expect(hoverBox?.style.left).toBe('12px');
+
+    harness.mark(target);
+    const record = harness.typed('VERA_INSPECTOR_SELECTION').at(-1)?.payload['record'] as
+      | Record<string, unknown>
+      | undefined;
+    expect(record?.['elementKey']).toBe('html:testid:shielded-target');
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('drops the shield and the stylesheet on session reset and on destroy', () => {
+    const harness = createHarness();
+    harness.hello();
+    harness.freeze(true);
+    expect(freezeStyleSheets()).toHaveLength(1);
+
+    harness.dispatch('VERA_INSPECTOR_SESSION_RESET', {}, nextRequestId('reset-frozen'));
+    expect(freezeStyleSheets()).toHaveLength(0);
+    expect(shieldElement()?.style.pointerEvents).toBe('none');
+
+    harness.freeze(true);
+    expect(freezeStyleSheets()).toHaveLength(1);
+    harness.bridge.destroy();
+    // Destroy unmounts the host outright, so the shield goes with it.
+    expect(freezeStyleSheets()).toHaveLength(0);
+    expect(overlayHost()).toBeNull();
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('does not install the frozen stylesheet twice across repeated freeze toggles', () => {
+    const harness = createHarness();
+    harness.hello();
+    for (let i = 0; i < 3; i += 1) {
+      harness.freeze(true);
+      expect(freezeStyleSheets()).toHaveLength(1);
+      harness.freeze(true);
+      expect(freezeStyleSheets()).toHaveLength(1);
+      harness.freeze(false);
+      expect(freezeStyleSheets()).toHaveLength(0);
+    }
     expect(harness.contractFailures()).toEqual([]);
   });
 });

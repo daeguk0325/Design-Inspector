@@ -63,9 +63,6 @@ export interface ChatMessage {
   /** Raw user text — never includes transmission-time citation prefix (§17). */
   content: string;
   citations: CitationSnapshot[];
-  pinned: boolean;
-  /** Explicit pin order — boolean alone is insufficient (§19.6). */
-  pinnedAt: number | null;
   status?: AssistantStatus;
   createdAt: number;
   decision?: DesignDecision;
@@ -96,12 +93,6 @@ export function latestUserRequest(session: InspectorSession): string {
     if (m && m.role === 'user') return m.content;
   }
   return '';
-}
-
-export function pinnedInOrder(session: InspectorSession): ChatMessage[] {
-  return session.messages
-    .filter((m) => m.pinned)
-    .sort((a, b) => (a.pinnedAt ?? 0) - (b.pinnedAt ?? 0));
 }
 
 export function makeId(prefix: string): string {

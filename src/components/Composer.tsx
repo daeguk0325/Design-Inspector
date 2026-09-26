@@ -37,6 +37,12 @@ export interface ComposerProps {
    * request still succeeded, it just carried no pixels.
    */
   visualNote?: string | null;
+  /**
+   * Refill request. A rewind puts the user's own words back so they can edit
+   * and resend instead of retyping. The nonce is what makes the same text
+   * seedable twice.
+   */
+  seed?: { text: string; nonce: number } | null;
 }
 
 const EMPTY_SELECTIONS: readonly SelectionRecord[] = [];
@@ -58,6 +64,7 @@ export function Composer({
   onOpenDetails,
   onClear,
   visualNote,
+  seed,
 }: ComposerProps) {
   const [text, setText] = useState('');
   const [preparing, setPreparing] = useState(false);
@@ -82,6 +89,13 @@ export function Composer({
   }, [preparing]);
 
   const ready = canSend && (targetReady ?? true);
+  /**
+   * A rewind refills the composer. The initial value is the seed, and the
+   * parent remounts this component with a fresh nonce per rewind, so the editor
+   * starts from the restored text as ordinary initial state rather than being
+   * poked from an effect after the fact.
+   */
+  const [initialText] = useState(seed?.text ?? '');
   const views = useMemo(
     () => buildAttachmentViews(selections, displayNumbers, captures),
     [selections, displayNumbers, captures],
@@ -225,6 +239,7 @@ export function Composer({
           onReady={handleReady}
           onTextChange={handleTextChange}
           placeholder={placeholder}
+          initialText={initialText}
         />
         {(error || removeNotice) && (
           <div className="compose-error" role="alert">{error ?? removeNotice}</div>

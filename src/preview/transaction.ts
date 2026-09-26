@@ -11,7 +11,8 @@ export type PreviewRuntimeStatus =
   | 'reset'
   | 'stale-binding';
 
-export type DesignDecision = 'accepted' | 'needs-revision' | 'rejected';
+/** Accept keeps the applied change; Reject rolls it back. There is no third state. */
+export type DesignDecision = 'accepted' | 'rejected';
 
 export const PREVIEW_RUNTIME_STATUSES: readonly PreviewRuntimeStatus[] = Object.freeze([
   'pending-rebind',
@@ -26,7 +27,6 @@ export const PREVIEW_RUNTIME_STATUSES: readonly PreviewRuntimeStatus[] = Object.
 
 export const DESIGN_DECISIONS: readonly DesignDecision[] = Object.freeze([
   'accepted',
-  'needs-revision',
   'rejected',
 ]);
 

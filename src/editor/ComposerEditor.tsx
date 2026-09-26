@@ -7,6 +7,9 @@ import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin';
 import { PlainTextPlugin } from '@lexical/react/LexicalPlainTextPlugin';
 import {
   $addUpdateTag,
+  $createParagraphNode,
+  $createTextNode,
+  $getRoot,
   $getSelection,
   $isRangeSelection,
   BLUR_COMMAND,
@@ -26,6 +29,7 @@ import {
   SELECTION_CHANGE_COMMAND,
   UNDO_COMMAND,
   mergeRegister,
+  createEditor,
   type EditorState,
   type LexicalEditor,
 } from 'lexical';
@@ -86,6 +90,8 @@ export interface ComposerEditorProps {
   onReady: (controller: ComposerEditorController | null) => void;
   onTextChange: (text: string) => void;
   placeholder: string;
+  /** Document text the editor starts with. Used to restore a rewound request. */
+  initialText?: string;
 }
 
 interface ComposerEditorCoreProps extends ComposerEditorProps {
@@ -156,9 +162,15 @@ export function ComposerEditor({
   onReady,
   onTextChange,
   placeholder,
+  initialText = '',
 }: ComposerEditorProps) {
   return (
-    <LexicalComposer initialConfig={initialConfig}>
+    <LexicalComposer
+      initialConfig={{
+        ...initialConfig,
+        editorState: initialText === '' ? undefined : buildInitialEditorState(initialText),
+      }}
+    >
       <ComposerEditorCore
         attachmentIds={attachmentIds}
         attachmentKey={attachmentIds.join('|')}
@@ -172,6 +184,30 @@ export function ComposerEditor({
       />
     </LexicalComposer>
   );
+}
+
+/**
+ * Seeds the document as real initial state, so restoring a rewound request needs
+ * no effect and no imperative poke at a mounted editor.
+ */
+function buildInitialEditorState(text: string): EditorState {
+  // A throwaway editor only exists to produce a snapshot; the real one is
+  // created by LexicalComposer from the same config.
+  const editor = createEditor({
+    namespace: initialConfig.namespace,
+    nodes: [...(initialConfig.nodes ?? [])],
+    onError: (error: Error) => {
+      if (import.meta.env.DEV) throw error;
+      console.error(error);
+    },
+  });
+  editor.update(
+    () => {
+      $getRoot().clear().append($createParagraphNode().append($createTextNode(text)));
+    },
+    { discrete: true },
+  );
+  return editor.getEditorState();
 }
 
 function ComposerEditorCore({

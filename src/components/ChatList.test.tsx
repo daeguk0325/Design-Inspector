@@ -50,8 +50,6 @@ function message(overrides: Partial<ChatMessage> = {}): ChatMessage {
     role: 'user',
     content: 'Make the primary button tighter',
     citations: [],
-    pinned: false,
-    pinnedAt: null,
     createdAt: 1,
     ...overrides,
   };
@@ -75,8 +73,7 @@ describe('ChatList inline citation references', () => {
         messages={messages}
         streaming={false}
         onCopy={vi.fn()}
-        onTogglePin={vi.fn()}
-        onRetry={vi.fn()}
+        onRevert={vi.fn()}
       />,
     );
   }
@@ -133,8 +130,7 @@ describe('ChatList inline citation references', () => {
         })]}
         streaming={false}
         onCopy={vi.fn()}
-        onTogglePin={vi.fn()}
-        onRetry={vi.fn()}
+        onRevert={vi.fn()}
         onCite={onCite}
       />,
     );
@@ -213,8 +209,7 @@ describe('ChatList inline citation references', () => {
         messages={[message({ content: 'make this roomier ({1})', citations: [citation()] })]}
         streaming={false}
         onCopy={onCopy}
-        onTogglePin={vi.fn()}
-        onRetry={vi.fn()}
+        onRevert={vi.fn()}
       />,
     );
     click(container.querySelector('.msg.user .actions .mini'));
@@ -223,19 +218,17 @@ describe('ChatList inline citation references', () => {
 });
 
 describe('ChatList message actions', () => {
-  it('keeps Copy, Pin, and Retry working next to the new controls', () => {
+  it('offers Copy and Rewind as icons, with no Pin and no Retry', () => {
     vi.useFakeTimers();
     const onCopy = vi.fn();
-    const onTogglePin = vi.fn();
-    const onRetry = vi.fn();
+    const onRevert = vi.fn();
     const user = message({ id: 'm1', citations: [citation()] });
     const container = mount(
       <ChatList
         messages={[user]}
         streaming={false}
         onCopy={onCopy}
-        onTogglePin={onTogglePin}
-        onRetry={onRetry}
+        onRevert={onRevert}
         onDecision={vi.fn()}
         onUndoPreview={vi.fn()}
         previews={{ m1: { status: 'applied' } }}
@@ -243,44 +236,101 @@ describe('ChatList message actions', () => {
     );
 
     const actions = container.querySelector('.msg.user .actions');
-    click(actions?.querySelector('[aria-label^="Copy"]'));
+    const copy = actions?.querySelector('[aria-label^="Copy"]');
+    expect(copy?.textContent?.trim()).toBe('Copy');
+    click(copy);
     expect(onCopy).toHaveBeenCalledWith(user.content);
-    expect(actions?.querySelector('[aria-label^="Copy"]')?.textContent).toBe('Copied ✓');
+    expect(copy?.textContent?.trim()).toBe('Copied');
 
-    click([...actions!.querySelectorAll('button')].find((b) => b.textContent === 'Pin'));
-    expect(onTogglePin).toHaveBeenCalledWith('m1');
-
-    click([...actions!.querySelectorAll('button')].find((b) => b.textContent === 'Retry'));
-    expect(onRetry).toHaveBeenCalledWith(user);
+    const rewind = actions?.querySelector('[aria-label^="Rewind"]');
+    expect(rewind).not.toBeNull();
+    click(rewind);
+    expect(onRevert).toHaveBeenCalledWith(user);
     vi.useRealTimers();
   });
 });
 
 describe('ChatList decision controls', () => {
-  it('marks the recorded decision and reports the next one', () => {
+  it('offers only Accept and Reject, and never Revise', () => {
     const onDecision = vi.fn();
     const container = mount(
       <ChatList
-        messages={[message({ id: 'a1', role: 'assistant', content: 'Done', citations: [], decision: 'accepted' })]}
+        messages={[message({ id: 'a1', role: 'assistant', content: 'Done' })]}
         streaming={false}
         onCopy={vi.fn()}
-        onTogglePin={vi.fn()}
-        onRetry={vi.fn()}
+        onRevert={vi.fn()}
         onDecision={onDecision}
+        previews={{ a1: { status: 'applied', proposalState: 'pending', summaryLines: ['PrimaryButton: padding 12px'] } }}
       />,
     );
 
     const group = container.querySelector('.msg.assistant .decide');
     expect(group?.getAttribute('role')).toBe('group');
     const accepted = group?.querySelector<HTMLElement>('[data-decision="accepted"]');
-    const revise = group?.querySelector<HTMLElement>('[data-decision="needs-revision"]');
     const reject = group?.querySelector<HTMLElement>('[data-decision="rejected"]');
-    expect(accepted?.getAttribute('aria-pressed')).toBe('true');
-    expect(revise?.getAttribute('aria-pressed')).toBe('false');
+    expect(accepted).not.toBeNull();
+    expect(reject).not.toBeNull();
+    // Revise was a state with no behaviour behind it.
+    expect(group?.querySelector('[data-decision="needs-revision"]')).toBeNull();
+    expect(group?.querySelectorAll('button')).toHaveLength(2);
+    expect(accepted?.getAttribute('aria-pressed')).toBe('false');
 
-    click(revise);
+    click(accepted);
     click(reject);
-    expect(onDecision.mock.calls).toEqual([['a1', 'needs-revision'], ['a1', 'rejected']]);
+    expect(onDecision.mock.calls).toEqual([['a1', 'accepted'], ['a1', 'rejected']]);
+  });
+
+  it('shows the change under review and says an undecided one is waiting', () => {
+    const container = mount(
+      <ChatList
+        messages={[message({ id: 'a1', role: 'assistant', content: 'Done' })]}
+        streaming={false}
+        onCopy={vi.fn()}
+        onRevert={vi.fn()}
+        onDecision={vi.fn()}
+        previews={{ a1: { status: 'applied', proposalState: 'pending', summaryLines: ['PrimaryButton: padding 12px', 'PrimaryButton: gap 8px'] } }}
+      />,
+    );
+    const proposal = container.querySelector('.msg.assistant .proposal');
+    expect(proposal?.getAttribute('data-state')).toBe('pending');
+    expect(proposal?.textContent).toContain('Waiting for you');
+    expect(proposal?.textContent).toContain('PrimaryButton: padding 12px');
+    expect(proposal?.textContent).toContain('PrimaryButton: gap 8px');
+    expect(proposal?.textContent).toContain('Send the next message to roll this back.');
+  });
+
+  it('reports a settled proposal and takes the buttons away', () => {
+    for (const [state, label] of [['accepted', 'Kept'], ['rejected', 'Rolled back']] as const) {
+      const container = mount(
+        <ChatList
+          messages={[message({ id: 'a1', role: 'assistant', content: 'Done', decision: state })]}
+          streaming={false}
+          onCopy={vi.fn()}
+          onRevert={vi.fn()}
+          onDecision={vi.fn()}
+          previews={{ a1: { status: 'applied', proposalState: state, summaryLines: ['PrimaryButton: padding 12px'] } }}
+        />,
+      );
+      expect(container.querySelector('.proposal')?.getAttribute('data-state')).toBe(state);
+      expect(container.querySelector('.proposal')?.textContent).toContain(label);
+      // A decided proposal is final; re-deciding it is not offered.
+      expect(container.querySelectorAll('.decide')).toHaveLength(0);
+    }
+  });
+
+  it('offers no decision for an answer that proposed nothing', () => {
+    const container = mount(
+      <ChatList
+        messages={[message({ id: 'a1', role: 'assistant', content: 'Done' })]}
+        streaming={false}
+        onCopy={vi.fn()}
+        onRevert={vi.fn()}
+        onDecision={vi.fn()}
+        previews={{ a1: { status: 'applied' } }}
+      />,
+    );
+    expect(container.querySelectorAll('.decide')).toHaveLength(0);
+    expect(container.querySelector('.proposal')).toBeNull();
   });
 
   it('is absent without a handler and on user messages', () => {
@@ -289,8 +339,7 @@ describe('ChatList decision controls', () => {
         messages={[message({ id: 'a1', role: 'assistant', content: 'Done' }), message({ id: 'u2' })]}
         streaming={false}
         onCopy={vi.fn()}
-        onTogglePin={vi.fn()}
-        onRetry={vi.fn()}
+        onRevert={vi.fn()}
       />,
     );
     expect(container.querySelectorAll('.decide')).toHaveLength(0);
@@ -310,8 +359,7 @@ describe('ChatList preview state', () => {
         messages={[assistant]}
         streaming={false}
         onCopy={vi.fn()}
-        onTogglePin={vi.fn()}
-        onRetry={vi.fn()}
+        onRevert={vi.fn()}
         previews={previews}
         onUndoPreview={onUndoPreview}
       />,
@@ -341,8 +389,7 @@ describe('ChatList preview state', () => {
         messages={[assistant]}
         streaming={false}
         onCopy={vi.fn()}
-        onTogglePin={vi.fn()}
-        onRetry={vi.fn()}
+        onRevert={vi.fn()}
         previews={previews}
         onUndoPreview={vi.fn()}
       />,
@@ -359,8 +406,7 @@ describe('ChatList preview state', () => {
         messages={[assistant, message({ id: 'u2' })]}
         streaming={false}
         onCopy={vi.fn()}
-        onTogglePin={vi.fn()}
-        onRetry={vi.fn()}
+        onRevert={vi.fn()}
         previews={{ u2: { status: 'applied' } }}
       />,
     );

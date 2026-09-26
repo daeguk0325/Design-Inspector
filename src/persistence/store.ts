@@ -64,19 +64,14 @@ function normalizeStatus(raw: unknown): AssistantStatus {
 function normalizeMessage(raw: unknown): ChatMessage | null {
   if (!isPlainObject(raw)) return null;
   const role: ChatMessage['role'] = raw['role'] === 'assistant' ? 'assistant' : 'user';
-  const pinned = raw['pinned'] === true;
+  // `pinned`/`pinnedAt` are read from storage and dropped: sessions saved before
+  // pins were removed still carry them, and an unknown key must not resurrect
+  // the field.
   const message: ChatMessage = {
     id: asString(raw['id']),
     role,
     content: asString(raw['content']),
     citations: Array.isArray(raw['citations']) ? (raw['citations'] as CitationSnapshot[]) : [],
-    pinned,
-    pinnedAt:
-      typeof raw['pinnedAt'] === 'number' && Number.isFinite(raw['pinnedAt'])
-        ? raw['pinnedAt']
-        : pinned
-          ? 0
-          : null,
     createdAt: asNumber(raw['createdAt']),
   };
   if (role === 'assistant') message.status = normalizeStatus(raw['status']);

@@ -322,14 +322,50 @@ describe('persistence', () => {
       role: 'assistant',
       content: '',
       citations: [],
-      pinned: false,
-      pinnedAt: null,
       status: 'completed',
       createdAt: 0,
       decision: 'rejected',
     });
     expect(session?.createdAt).toBe(0);
     expect(session?.updatedAt).toBe(0);
+  });
+
+  it('drops the removed pin fields instead of resurrecting them', () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        data: {
+          sessions: [
+            {
+              id: 's1',
+              title: 'T',
+              messages: [
+                {
+                  id: 'a',
+                  role: 'user',
+                  content: 'hi',
+                  citations: [],
+                  pinned: true,
+                  pinnedAt: 1234,
+                  createdAt: 5,
+                },
+              ],
+              previewTransactions: [],
+              persistedActiveSelectionIds: [],
+              createdAt: 0,
+              updatedAt: 0,
+            },
+          ],
+          currentSessionId: 's1',
+        },
+      }),
+    );
+    const message = loadPersisted().shape.sessions[0]?.messages[0];
+    expect(message).toBeDefined();
+    expect(message).not.toHaveProperty('pinned');
+    expect(message).not.toHaveProperty('pinnedAt');
+    expect(message).toEqual({ id: 'a', role: 'user', content: 'hi', citations: [], createdAt: 5 });
   });
 
   it('keeps non-streaming v1 assistant statuses during migration', () => {

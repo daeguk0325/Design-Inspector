@@ -726,6 +726,84 @@ button, input, textarea, select { font: inherit; color: inherit; }
   .statusline { margin-left: 0; }
 }
 
+/* ---- proposal state (§9f) ---- */
+.proposal {
+  margin: 6px 0 2px; padding: 8px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft); background: var(--surface-soft);
+  font-size: 12.5px; display: flex; flex-direction: column; gap: 5px;
+}
+.proposal[data-state="pending"] { border-color: var(--accent-border); background: var(--accent-soft); }
+.proposal[data-state="rejected"] { opacity: 0.72; }
+.proposal-state { font-weight: 650; font-size: 11.5px; letter-spacing: 0.01em; }
+.proposal[data-state="accepted"] .proposal-state { color: var(--ok, #0f766e); }
+.proposal[data-state="rejected"] .proposal-state { color: var(--text-2); }
+.proposal-changes { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 2px; }
+.proposal-changes li { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); word-break: break-word; }
+.proposal-note { margin: 0; font-size: 11.5px; color: var(--text-2); }
+.icon-btn { display: inline-flex; align-items: center; gap: 5px; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ---- undo rewind: a destructive rewind is reversible, not confirmed ---- */
+.revert-undo {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  margin: 0 0 8px; border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm); background: var(--accent-soft);
+  font-size: 12.5px;
+  animation: revert-undo-in 0.22s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+.revert-undo-text { flex: 1 1 auto; min-width: 0; }
+@keyframes revert-undo-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---- change log panel ---- */
+.proposal-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; width: 400px; max-width: 92vw;
+  background: var(--surface); border-left: 1px solid var(--border);
+  box-shadow: -12px 0 32px rgba(0,0,0,0.08); z-index: 40;
+  display: flex; flex-direction: column;
+  animation: slidein 0.18s ease-out;
+}
+.proposal-panel-head {
+  display: flex; align-items: flex-start; gap: 8px; padding: 14px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.proposal-panel-head h2 { margin: 0; font-size: 14.5px; font-weight: 650; }
+.proposal-panel-sub { margin: 3px 0 0; font-size: 11.5px; color: var(--text-2); }
+.proposal-panel-body { flex: 1 1 auto; overflow: auto; padding: 12px 16px; }
+.proposal-empty { margin: 0; font-size: 12.5px; color: var(--text-2); line-height: 1.6; }
+.proposal-group { margin-bottom: 14px; }
+.proposal-group h3 { margin: 0 0 6px; font-size: 12.5px; font-weight: 650; }
+.proposal-group ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.proposal-group li {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 11.5px; font-family: var(--mono);
+  padding: 5px 7px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+}
+.proposal-before { color: var(--text-2); text-decoration: line-through; }
+.proposal-arrow { color: var(--text-2); }
+.proposal-after { font-weight: 600; }
+.proposal-panel-foot {
+  display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border-soft);
+}
+.proposal-panel-foot .mini, .proposal-panel-foot .primary-mini { flex: 1 1 0; justify-content: center; }
+.changelog-pill { display: inline-flex; align-items: center; gap: 6px; }
+.changelog-count, .changelog-pending {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 17px; height: 17px; padding: 0 4px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 700; font-family: var(--mono);
+}
+.changelog-count { background: var(--accent); color: #fff; }
+.changelog-pending { background: #f59e0b; color: #1f1300; }
+
+@media (prefers-reduced-motion: reduce) {
+  .revert-undo, .proposal-panel { animation: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .attach-tag,
   .attach-tag[data-armed='true'],

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { AttachmentChips } from '../editor/AttachmentChip.tsx';
 import type { DesignDecision, PreviewRuntimeStatus } from '../preview/transaction.ts';
+import type { ProposalState } from '../preview/proposal.ts';
 import type { ChatMessage } from '../state/models.ts';
 import { shortcutLabel } from '../shortcut.ts';
 import { MarkdownMessage } from './MarkdownMessage.tsx';
@@ -12,6 +13,10 @@ export interface MessagePreviewStatus {
   enabled?: boolean;
   changeCount?: number;
   errorCode?: string;
+  /** Present once the message carries a proposal. Absent means it proposed nothing. */
+  proposalState?: ProposalState;
+  /** The exact lines the next request will carry for this proposal. */
+  summaryLines?: readonly string[];
 }
 
 export type MessagePreviewLookup =
@@ -22,8 +27,7 @@ export interface ChatListProps {
   messages: ChatMessage[];
   streaming: boolean;
   onCopy: (text: string) => void;
-  onTogglePin: (id: string) => void;
-  onRetry: (userMsg: ChatMessage) => void;
+  onRevert: (userMsg: ChatMessage) => void;
   previews?: MessagePreviewLookup;
   onDecision?: (messageId: string, decision: DesignDecision) => void;
   onUndoPreview?: (messageId: string) => void;
@@ -37,11 +41,21 @@ interface DecisionOption {
   hint: string;
 }
 
+/**
+ * Revise was a third state with no behaviour behind it: it recorded a third
+ * value and changed nothing on screen. The product has two real outcomes for a
+ * proposal — keep the applied change, or roll it back.
+ */
 const DECISION_OPTIONS: readonly DecisionOption[] = Object.freeze([
-  { value: 'accepted', label: 'Accept', hint: 'Accept this design as delivered' },
-  { value: 'needs-revision', label: 'Revise', hint: 'This design needs revision' },
-  { value: 'rejected', label: 'Reject', hint: 'Reject this design' },
+  { value: 'accepted', label: 'Accept', hint: 'Keep this change applied' },
+  { value: 'rejected', label: 'Reject', hint: 'Roll this change back' },
 ]);
+
+const PROPOSAL_STATE_LABEL: Record<ProposalState, string> = Object.freeze({
+  pending: 'Waiting for you',
+  accepted: 'Kept',
+  rejected: 'Rolled back',
+});
 
 const PREVIEW_STATUS_LABEL: Record<PreviewRuntimeStatus, string> = Object.freeze({
   'pending-rebind': 'Pending rebind',
@@ -63,6 +77,32 @@ function previewFor(
     ? previews.get(messageId)
     : (previews as Readonly<Record<string, MessagePreviewStatus>>)[messageId];
   return value ?? null;
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+      <rect x="5.75" y="1.75" width="8.5" height="10.5" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M10.5 14.5h-7a2 2 0 0 1-2-2v-9" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+      <path d="M3 8.5 6.5 12 13 4.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function RevertIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+      <path d="M3.2 8a4.8 4.8 0 1 0 1.55-3.55" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <path d="M2.4 2.9v2.8h2.8" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
 }
 
 function MessageAttachments({ message }: { message: ChatMessage }) {
@@ -98,6 +138,40 @@ function DecisionControls({
           {option.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+/**
+ * The proposal itself: what it would change, and whether it is still waiting.
+ *
+ * The change lines are the same strings the next request will carry, so what
+ * the user approves here is literally what the model is told. An undecided
+ * proposal says so, because sending the next message rejects it.
+ */
+function ProposalState({
+  preview,
+}: {
+  preview: MessagePreviewStatus;
+}) {
+  const state = preview.proposalState;
+  if (!state) return null;
+  const lines = preview.summaryLines ?? [];
+  return (
+    <div className="proposal" data-state={state}>
+      <span className="proposal-state" role="status">
+        {PROPOSAL_STATE_LABEL[state]}
+      </span>
+      {lines.length > 0 && (
+        <ul className="proposal-changes">
+          {lines.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
+      )}
+      {state === 'pending' && (
+        <p className="proposal-note">Send the next message to roll this back.</p>
+      )}
     </div>
   );
 }
@@ -164,8 +238,7 @@ export function ChatList({
   messages,
   streaming,
   onCopy,
-  onTogglePin,
-  onRetry,
+  onRevert,
   previews,
   onDecision,
   onUndoPreview,
@@ -192,6 +265,7 @@ export function ChatList({
     <div className="messages" aria-live="polite">
       {messages.map((m) => {
         const preview = previewFor(previews, m.id);
+        const decided = preview?.proposalState === 'accepted' || preview?.proposalState === 'rejected';
         return (
           <div className={`msg ${m.role}`} key={m.id}>
             <div className="bubble">
@@ -201,7 +275,8 @@ export function ChatList({
             {m.role === 'assistant' && preview && (
               <PreviewState message={m} preview={preview} onUndoPreview={onUndoPreview} />
             )}
-            {m.role === 'assistant' && onDecision && (
+            {m.role === 'assistant' && preview && <ProposalState preview={preview} />}
+            {m.role === 'assistant' && onDecision && preview?.proposalState && !decided && (
               <DecisionControls message={m} onDecision={onDecision} />
             )}
             {m.role === 'assistant' && m.status !== undefined && m.status !== 'completed' && (
@@ -212,7 +287,7 @@ export function ChatList({
             <div className="actions">
               <button
                 type="button"
-                className="mini"
+                className="mini icon-btn"
                 title="Copy message"
                 aria-label={`Copy ${m.role} message`}
                 onClick={() => {
@@ -221,25 +296,19 @@ export function ChatList({
                   window.setTimeout(() => setCopiedId((c) => (c === m.id ? null : c)), 1200);
                 }}
               >
-                {copiedId === m.id ? 'Copied ✓' : 'Copy'}
-              </button>
-              <button
-                type="button"
-                className="mini"
-                title={m.pinned ? 'Unpin constraint' : 'Pin as constraint'}
-                aria-pressed={m.pinned}
-                onClick={() => onTogglePin(m.id)}
-              >
-                {m.pinned ? 'Unpin' : 'Pin'}
+                {copiedId === m.id ? <CheckIcon /> : <CopyIcon />}
+                <span className="sr-only">{copiedId === m.id ? 'Copied' : 'Copy'}</span>
               </button>
               {m.role === 'user' && (
                 <button
                   type="button"
-                  className="mini"
-                  title="Retry last assistant answer for this request"
-                  onClick={() => onRetry(m)}
+                  className="mini icon-btn"
+                  title="Rewind to here — deletes this and everything after it, clears the applied previews, and puts the text back in the composer"
+                  aria-label="Rewind conversation to this message"
+                  onClick={() => onRevert(m)}
                 >
-                  Retry
+                  <RevertIcon />
+                  <span className="sr-only">Rewind</span>
                 </button>
               )}
             </div>

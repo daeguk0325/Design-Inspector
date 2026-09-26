@@ -298,8 +298,6 @@ function userMessage(id: string, citations: CitationSnapshot[]): ChatMessage {
     role: 'user',
     content: '대비를 높여주세요',
     citations,
-    pinned: false,
-    pinnedAt: null,
     createdAt: 1_000,
   };
 }
@@ -308,10 +306,8 @@ function assistantMessage(id: string): ChatMessage {
   return {
     id,
     role: 'assistant',
-    content: '## 디자이너 전달문\n\n대비를 높였습니다 [1]\n',
+    content: '대비를 높였습니다 [1]\n',
     citations: [],
-    pinned: false,
-    pinnedAt: null,
     status: 'completed',
     createdAt: 2_000,
   };
@@ -352,7 +348,7 @@ function completion(overrides: Partial<ChatCompletion> = {}): ChatCompletion {
     userMessageId: 'u1',
     candidate: candidate([{ target: 1, declarations: { 'border-radius': '10px' } }]),
     citations: [citation(1)],
-    content: '## 디자이너 전달문\n\n대비를 높였습니다 [1]\n',
+    content: '대비를 높였습니다 [1]\n',
     truncated: false,
     errored: false,
     ...overrides,
@@ -367,8 +363,9 @@ function pairSession(id: string): InspectorSession {
   });
 }
 
-function pairCompletion(assistantId: 'a1' | 'a2'): ChatCompletion {
+function pairCompletion(assistantId: 'a1' | 'a2', sessionId = 's-a'): ChatCompletion {
   return completion({
+    sessionId,
     assistantId,
     citations: PAIR,
     candidate: candidate([{ target: assistantId === 'a1' ? 1 : 2, declarations: { color: '#111111' } }]),
@@ -1037,7 +1034,7 @@ describe('preview controller decisions and lookup', () => {
   it('records a decision on the addressed message only', async () => {
     const messages = [userMessage('u1', [citation(1)]), assistantMessage('a1'), assistantMessage('a2')];
     const harness = mount(createStore([session('s-a', { messages })], 's-a'), createBridge());
-    const decisions: DesignDecision[] = ['accepted', 'needs-revision', 'rejected'];
+    const decisions: DesignDecision[] = ['accepted', 'accepted', 'rejected'];
     for (const decision of decisions) {
       await act(async () => {
         harness.controller().decide('a1', decision);
@@ -1331,5 +1328,242 @@ describe('preview controller stale closures', () => {
     harness.render();
     expect(harness.store.session('s-a')?.previewTransactions[0]?.status).toBe('undone');
     expect(harness.store.session('s-b')?.previewTransactions).toEqual([]);
+  });
+});
+
+describe('proposal decisions', () => {
+  /** A session with one applied proposal, driven through applyCompletion. */
+  async function withProposal(): Promise<Harness> {
+    const s = pairSession('sess');
+    const store = createStore([s], s.id);
+    const bridge = createBridge();
+    const harness = mount(store, bridge);
+    harness.render();
+    await applyClean(harness, pairCompletion('a1', 'sess'));
+    return harness;
+  }
+
+  it('leaves an applied proposal pending and offers it for decision', async () => {
+    const harness = await withProposal();
+    expect(harness.message('a1').decision).toBeUndefined();
+    expect(harness.controller().pendingCount).toBe(1);
+    const status = harness.controller().previews.get('a1');
+    expect(status?.proposalState).toBe('pending');
+    expect(status?.summaryLines?.length).toBeGreaterThan(0);
+  });
+
+  it('keeps the preview applied when the user accepts', async () => {
+    const harness = await withProposal();
+    harness.bridge.undoPreview.mockClear();
+    await act(async () => {
+      await harness.controller().decide('a1', 'accepted');
+    });
+    await settle();
+    harness.render();
+    expect(harness.message('a1').decision).toBe('accepted');
+    // Accept is a no-op on the target: the change is already applied.
+    expect(harness.bridge.undoPreview).not.toHaveBeenCalled();
+    expect(harness.transaction('a1').enabled).toBe(true);
+    expect(harness.controller().pendingCount).toBe(0);
+    expect(harness.controller().previews.get('a1')?.proposalState).toBe('accepted');
+  });
+
+  it('rolls the preview back when the user rejects', async () => {
+    const harness = await withProposal();
+    const undo = harness.bridge.undoPreview;
+    undo.mockClear();
+    await act(async () => {
+      await harness.controller().decide('a1', 'rejected');
+    });
+    await settle();
+    harness.render();
+    expect(harness.message('a1').decision).toBe('rejected');
+    expect(undo).toHaveBeenCalledWith('sess', harness.transaction('a1').id);
+    expect(harness.transaction('a1').enabled).toBe(false);
+    expect(harness.transaction('a1').status).toBe('undone');
+    expect(harness.controller().activeCount).toBe(0);
+  });
+
+  it('rejects every undecided proposal when the next message is sent', async () => {
+    const harness = await withProposal();
+    await act(async () => {
+      await harness.controller().decide('a1', 'accepted');
+    });
+    await settle();
+    await applyClean(harness, pairCompletion('a2', 'sess'));
+    expect(harness.controller().pendingCount).toBe(1);
+
+    const undo = harness.bridge.undoPreview;
+    undo.mockClear();
+    const results: Array<Awaited<ReturnType<PreviewController['settlePending']>>> = [];
+    await act(async () => {
+      results.push(await harness.controller().settlePending());
+    });
+    const settled = results[0];
+    await settle();
+
+    harness.render();
+
+    expect(settled?.rejected).toBe(1);
+    // Only the pending one is rolled back; the accepted one is left alone.
+    expect(undo).toHaveBeenCalledTimes(1);
+    expect(undo).toHaveBeenCalledWith('sess', harness.transaction('a2').id);
+    expect(harness.message('a2').decision).toBe('rejected');
+    expect(harness.message('a1').decision).toBe('accepted');
+    expect(harness.transaction('a1').enabled).toBe(true);
+    expect(harness.transaction('a2').enabled).toBe(false);
+    expect(harness.controller().pendingCount).toBe(0);
+  });
+
+  it('hands the caller the settled state the next prompt has to be built from', async () => {
+    // A session read after the commit would still be the pre-commit value, so
+    // the controller returns what it just wrote.
+    const harness = await withProposal();
+    const results: Array<Awaited<ReturnType<PreviewController['settlePending']>>> = [];
+    await act(async () => {
+      results.push(await harness.controller().settlePending());
+    });
+    const settled = results[0];
+    await settle();
+    harness.render();
+    expect(settled?.rejected).toBe(1);
+    expect(settled?.messages.find((m) => m.id === 'a1')?.decision).toBe('rejected');
+    expect(settled?.transactions.every((t) => t.enabled === false)).toBe(true);
+  });
+
+  it('settles nothing when there is no pending proposal', async () => {
+    const harness = await withProposal();
+    await act(async () => {
+      await harness.controller().decide('a1', 'accepted');
+    });
+    await settle();
+    harness.render();
+    const undo = harness.bridge.undoPreview;
+    undo.mockClear();
+    const results: Array<Awaited<ReturnType<PreviewController['settlePending']>>> = [];
+    await act(async () => {
+      results.push(await harness.controller().settlePending());
+    });
+    const settled = results[0];
+    await settle();
+    harness.render();
+    expect(settled?.rejected).toBe(0);
+    expect(undo).not.toHaveBeenCalled();
+  });
+
+  it('keeps the change live and says so when the rollback fails', async () => {
+    const harness = await withProposal();
+    harness.bridge.state.undoResponder = () => Promise.reject(new Error('bridge gone'));
+    await act(async () => {
+      await harness.controller().decide('a1', 'rejected');
+    });
+    await settle();
+    harness.render();
+    expect(harness.message('a1').decision).toBe('rejected');
+    // The page is still styled, so the transaction stays enabled: a later
+    // reset only clears what it can still see. Marking it undone here would
+    // strand the change on the target forever.
+    expect(harness.transaction('a1').enabled).toBe(true);
+    expect(harness.transaction('a1').errorCode).toBe('undo-failed');
+
+    harness.bridge.state.undoResponder = (call) =>
+      Promise.resolve(previewResult('undo', 'undone', call));
+    await act(async () => {
+      await harness.controller().reset();
+    });
+    await settle();
+    harness.render();
+    expect(harness.controller().activeCount).toBe(0);
+  });
+});
+
+describe('rewind', () => {
+  async function withTwoTurns(): Promise<Harness> {
+    const s = pairSession('sess');
+    const store = createStore([s], s.id);
+    const bridge = createBridge();
+    const harness = mount(store, bridge);
+    harness.render();
+    await applyClean(harness, pairCompletion('a1', 'sess'));
+    await applyClean(harness, pairCompletion('a2', 'sess'));
+    return harness;
+  }
+
+  it('drops the conversation from that point and clears every applied preview', async () => {
+    const harness = await withTwoTurns();
+    const reset = harness.bridge.resetPreviews;
+    reset.mockClear();
+    const target = harness.store.current()!.messages.find((m) => m.role === 'user');
+    const results: Array<Awaited<ReturnType<PreviewController['revertTo']>>> = [];
+    await act(async () => {
+      results.push(await harness.controller().revertTo(target!.id));
+    });
+    const snapshot = results[0];
+    await settle();
+    harness.render();
+
+    expect(snapshot).not.toBeNull();
+    const messages = harness.store.current()!.messages;
+    expect(messages.some((m) => m.id === target!.id)).toBe(false);
+    expect(messages.every((m) => m.id !== 'a1' && m.id !== 'a2')).toBe(true);
+    expect(harness.store.current()!.previewTransactions.every((t) => t.enabled === false)).toBe(true);
+    expect(harness.controller().activeCount).toBe(0);
+    expect(harness.controller().pendingCount).toBe(0);
+    expect(reset).toHaveBeenCalled();
+  });
+
+  it('returns the state an undo can put back, previews included', async () => {
+    const harness = await withTwoTurns();
+    const before = harness.store.current()!;
+    const target = before.messages.find((m) => m.role === 'user')!;
+    const results: Array<Awaited<ReturnType<PreviewController['revertTo']>>> = [];
+    await act(async () => {
+      results.push(await harness.controller().revertTo(target.id));
+    });
+    const snapshot = results[0];
+    await settle();
+    expect(snapshot?.messages).toEqual(before.messages);
+    expect(snapshot?.previewTransactions).toEqual(before.previewTransactions);
+    // Restoring the messages is only honest if the previews come back too.
+    expect(snapshot?.previewTransactions.filter((t) => t.enabled)).toHaveLength(2);
+  });
+
+  it('refuses a target that is not a user message, and changes nothing', async () => {
+    const harness = await withTwoTurns();
+    const before = harness.store.current()!;
+    const reset = harness.bridge.resetPreviews;
+    reset.mockClear();
+    const results: Array<Awaited<ReturnType<PreviewController['revertTo']>>> = [];
+    await act(async () => {
+      results.push(await harness.controller().revertTo('a1'));
+    });
+    const snapshot = results[0];
+    await settle();
+    expect(snapshot).toBeNull();
+    expect(harness.store.current()!.messages).toEqual(before.messages);
+    expect(reset).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unknown id', async () => {
+    const harness = await withTwoTurns();
+    const results: Array<Awaited<ReturnType<PreviewController['revertTo']>>> = [];
+    await act(async () => {
+      results.push(await harness.controller().revertTo('does-not-exist'));
+    });
+    const snapshot = results[0];
+    await settle();
+    expect(snapshot).toBeNull();
+  });
+
+  it('rewinds the conversation even when the bridge reset fails', async () => {
+    const harness = await withTwoTurns();
+    const state = harness.bridge.state;
+    state.resetResponder = () => Promise.reject(new Error('bridge gone'));
+    const target = harness.store.current()!.messages.find((m) => m.role === 'user')!;
+    await act(async () => {
+      await harness.controller().revertTo(target.id);
+    });
+    await settle();
+    expect(harness.store.current()!.messages.some((m) => m.id === target.id)).toBe(false);
   });
 });

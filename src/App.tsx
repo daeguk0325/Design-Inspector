@@ -16,6 +16,7 @@ import { useSessions } from './hooks/useSessions.ts';
 import { useChat } from './hooks/useChat.ts';
 import { reconcileActiveSelections } from './state/reconcile.ts';
 import type { ChatMessage } from './state/models.ts';
+import type { PreviewTransaction } from './preview/transaction.ts';
 import { parseInspectorTokenFromSearch, parseTargetFromSearch, stripTargetParam } from './target/fromQuery.ts';
 import { createTargetProxyRoute, validateTargetProxyInput } from './supervisor/client.ts';
 import { buildAgentPrompt, buildRawTranscript } from './export/serialize.ts';
@@ -35,12 +36,31 @@ import {
   saveChatRatio,
 } from './layout/split.ts';
 import { usePreviewController } from './preview/controller.ts';
+import { changeLogForSession } from './preview/proposal.ts';
+import { ProposalPanel } from './components/ProposalPanel.tsx';
 
 const VIEWPORT_WIDTHS: Record<ViewportPreset, number> = {
   desktop: 1280,
   tablet: 834,
   mobile: 390,
 };
+
+/** What a rewind replaced, so it can be put back with one click. */
+interface RevertUndoState {
+  sessionId: string;
+  messages: ChatMessage[];
+  previewTransactions: PreviewTransaction[];
+  text: string;
+}
+
+/**
+ * A one-shot instruction to refill the composer. The nonce is what makes the
+ * same text seedable twice.
+ */
+interface ComposerSeed {
+  text: string;
+  nonce: number;
+}
 
 export default function App() {
   const sessions = useSessions();
@@ -53,7 +73,8 @@ export default function App() {
   const [loadedUrl, setLoadedUrl] = useState('');
   const [urlError, setUrlError] = useState<string | null>(null);
   const [iframeKey, setIframeKey] = useState('initial');
-  const [drawer, setDrawer] = useState<'sessions' | 'settings' | 'more' | null>(null);
+  const [drawer, setDrawer] = useState<'sessions' | 'settings' | 'more' | 'changelog' | null>(null);
+
   const [copied, setCopied] = useState(false);
   const [copiedRaw, setCopiedRaw] = useState(false);
   const [chatRatio, setChatRatio] = useState(loadChatRatio);
@@ -64,6 +85,13 @@ export default function App() {
   const [boundSessionId, setBoundSessionId] = useState<string | null>(null);
   const [viewport, setViewport] = useState<ViewportPreset>('desktop');
   const [detailsSelectionId, setDetailsSelectionId] = useState<string | null>(null);
+  /**
+   * A rewind is destructive, so it is reversible rather than confirmed: the
+   * state it replaced is kept here until the next send, and the composer gets
+   * the original text back either way.
+   */
+  const [revertUndo, setRevertUndo] = useState<RevertUndoState | null>(null);
+  const [composerSeed, setComposerSeed] = useState<ComposerSeed | null>(null);
   const workRef = useRef<HTMLDivElement | null>(null);
   const targetPaneRef = useRef<HTMLElement | null>(null);
   const chatPaneRef = useRef<HTMLElement | null>(null);
@@ -75,6 +103,8 @@ export default function App() {
     updateSession: sessions.updateSession,
     autoEnabled: sessions.settings.autoCssPreview,
   });
+  const changeLog = useMemo(() => changeLogForSession(current), [current]);
+
   const pruneCaptures = bridge.pruneCaptures;
   const captureSelection = bridge.captureSelection;
   const bridgeCaptures = bridge.captures;
@@ -332,20 +362,36 @@ export default function App() {
     void copyText(out, setCopied);
   }
 
-  function togglePin(id: string) {
-    if (!current) return;
-    sessions.updateSession(current.id, (s) => ({
+  const sessionModel = current?.model || sessions.settings.globalModel || '';
+
+  /**
+   * Puts a rewound conversation back, re-applying the previews that were live
+   * at the time. Replay is what makes this honest: restoring only the messages
+   * would leave the page unstyled while the log claimed changes were applied.
+   */
+  async function undoRevert() {
+    const state = revertUndo;
+    if (!state) return;
+    setRevertUndo(null);
+    sessions.updateSession(state.sessionId, (s) => ({
       ...s,
-      messages: s.messages.map((m) =>
-        m.id === id
-          ? { ...m, pinned: !m.pinned, pinnedAt: !m.pinned ? Date.now() : null }
-          : m,
-      ),
+      messages: state.messages,
+      previewTransactions: state.previewTransactions,
       updatedAt: Date.now(),
     }));
+    const replay = state.previewTransactions.filter(
+      (transaction) => transaction.enabled && transaction.sessionId === state.sessionId,
+    );
+    if (replay.length === 0) return;
+    try {
+      await bridge.resetPreviews(
+        state.sessionId,
+        replay.map((transaction) => transaction.id),
+      );
+    } catch {
+      setChatError('Previews could not be restored. The conversation was rewound back anyway.');
+    }
   }
-
-  const sessionModel = current?.model || sessions.settings.globalModel || '';
 
   /**
    * Named failure reasons, not a bare `undefined`. The composer blocks on this
@@ -508,7 +554,11 @@ export default function App() {
         onOpenMore={() => setDrawer('more')}
         sessionCount={sessions.sessions.length}
         previewCount={preview.activeCount}
+        pendingCount={preview.pendingCount}
+        changeCount={changeLog.length}
+        onOpenChangeLog={() => setDrawer('changelog')}
         onResetPreviews={() => void preview.reset()}
+
         viewport={viewport}
         onViewportChange={setViewport}
       />
@@ -572,21 +622,22 @@ export default function App() {
               onDecision={preview.decide}
               onUndoPreview={(messageId) => void preview.undo(messageId)}
               onCopy={(t) => void copyText(t, () => undefined)}
-              onTogglePin={togglePin}
               onCite={bridge.reselectSelection}
-              onRetry={(userMsg) =>
-                void chat.retry(
-                  current.id,
-                  userMsg,
-                  userMsg.citations,
-                  current.messages,
-                  ollamaBaseUrl,
-                  sessionModel,
-                  appendMessage,
-                  patchMessage,
-                  preview.applyCompletion,
-                )
-              }
+              onRevert={(userMsg) => {
+                const text = userMsg.content;
+                if (!current) return;
+                void (async () => {
+                  const snapshot = await preview.revertTo(userMsg.id);
+                  if (!snapshot) return;
+                  setRevertUndo({
+                    sessionId: current.id,
+                    messages: snapshot.messages,
+                    previewTransactions: snapshot.previewTransactions,
+                    text,
+                  });
+                  setComposerSeed({ text, nonce: Date.now() });
+                })();
+              }}
             />
           ) : null}
 
@@ -597,8 +648,26 @@ export default function App() {
             </div>
           )}
 
+          {revertUndo && (
+            <div className="revert-undo" role="status">
+              <span className="revert-undo-text">Conversation rewound. The text is back in the composer.</span>
+              <button type="button" className="mini" onClick={() => void undoRevert()}>
+                Undo rewind
+              </button>
+              <button
+                type="button"
+                className="mini icon-btn"
+                aria-label="Dismiss undo rewind"
+                onClick={() => setRevertUndo(null)}
+              >
+                ×
+              </button>
+            </div>
+          )}
+
           <Composer
-            key={current?.id ?? 'no-session'}
+            key={`${current?.id ?? 'no-session'}:${composerSeed?.nonce ?? 0}`}
+
             streaming={chat.streaming}
             canSend={targetReady}
             targetReady={targetReady}
@@ -615,6 +684,7 @@ export default function App() {
             onClear={bridge.clearAll}
             error={chatError ?? bridge.lastError}
             visualNote={visualNote}
+            seed={composerSeed}
             onSend={async (text) => {
               if (!current) return false;
               if (!sessionModel) {
@@ -623,7 +693,14 @@ export default function App() {
               }
               setChatError(null);
               setVisualNote(null);
+              setRevertUndo(null);
               try {
+                // Settle before the prompt is built: an undecided proposal is
+                // rejected by the act of moving on, and the next request has to
+                // see that decision, not a still-pending preview.
+                const settled = await preview.settlePending();
+                const messages = settled?.messages ?? current.messages;
+                const transactions = settled?.transactions ?? current.previewTransactions;
                 const prepared = await prepareVisualContext();
                 if (!prepared.ok) {
                   setVisualNote(VISUAL_REASON_TEXT[prepared.reason]);
@@ -638,10 +715,11 @@ export default function App() {
                   prepared.ok ? prepared.transmission : undefined,
                   appendMessage,
                   patchMessage,
-                  current.messages,
+                  messages,
                   ollamaBaseUrl,
                   sessionModel,
                   preview.applyCompletion,
+                  transactions,
                 );
               } catch (error) {
                 setChatError(error instanceof Error ? error.message : 'Visual context could not be prepared.');
@@ -654,6 +732,13 @@ export default function App() {
       </div>
 
       <SessionsDrawer api={sessions} open={drawer === 'sessions'} onClose={() => setDrawer(null)} />
+      <ProposalPanel
+        open={drawer === 'changelog'}
+        session={current}
+        onClose={() => setDrawer(null)}
+        onCopy={(text) => void copyText(text, () => undefined)}
+      />
+
       <SettingsDrawer
         open={drawer === 'settings'}
         onClose={() => setDrawer(null)}

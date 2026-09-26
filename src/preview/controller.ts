@@ -14,6 +14,7 @@ import type {
   PreviewTransaction,
 } from './transaction.ts';
 import { MAX_PREVIEW_RULES, MAX_PREVIEW_TARGET } from './contract.ts';
+import { pendingForSession, proposalsIn, proposalSummaryLines } from './proposal.ts';
 import type { MessagePreviewStatus } from '../components/ChatList.tsx';
 
 interface ControllerInput {
@@ -27,9 +28,41 @@ export interface PreviewController {
   applyCompletion: (completion: ChatCompletion) => void;
   undo: (assistantId: string) => Promise<void>;
   reset: () => Promise<void>;
-  decide: (messageId: string, decision: DesignDecision) => void;
+  /**
+   * Accept keeps the applied change; Reject rolls it back. Either way the
+   * decision is recorded so the next request carries it.
+   */
+  decide: (messageId: string, decision: DesignDecision) => Promise<void>;
+  /**
+   * Settles every still-pending proposal as rejected, rolling each one back.
+   *
+   * Called before each send: an undecided proposal is not something the user
+   * meant to keep, and the product says so. Accept/reject is opt-in, and moving
+   * on is a decision too.
+   *
+   * The settled messages and transactions are returned rather than re-read
+   * from the session. The caller builds the very next prompt from them, and a
+   * session read after the commit would still be the pre-commit value.
+   */
+  settlePending: () => Promise<SettledState | null>;
+  /** Drops every transaction and rewinds the conversation to `userMessageId`. */
+  revertTo: (userMessageId: string) => Promise<RevertSnapshot | null>;
   previews: ReadonlyMap<string, MessagePreviewStatus>;
   activeCount: number;
+  pendingCount: number;
+}
+
+/** The session state a caller must use for the request that triggered a settle. */
+export interface SettledState {
+  rejected: number;
+  messages: ChatMessage[];
+  transactions: PreviewTransaction[];
+}
+
+/** Everything needed to put a rewind back the way it was. */
+export interface RevertSnapshot {
+  messages: ChatMessage[];
+  previewTransactions: PreviewTransaction[];
 }
 
 function resultStatus(result: PreviewResultPayload): PreviewRuntimeStatus {
@@ -239,16 +272,121 @@ export function usePreviewController({ bridge, session, updateSession, autoEnabl
     }
   }, [patchTransaction, session]);
 
-  const decide = useCallback((messageId: string, decision: DesignDecision) => {
+  const decide = useCallback(async (messageId: string, decision: DesignDecision) => {
     const current = sessionRef.current;
     if (!session || !current || current.id !== session.id) return;
-    updateSessionRef.current(current.id, (existing) => ({
+    const ownerId = current.id;
+    const markDecision = updateSessionRef.current;
+    const transaction = current.previewTransactions.find(
+      (item) => item.assistantId === messageId,
+    );
+    if (transaction && transaction.enabled) {
+      // Accept is a no-op on the target: the change is already applied and
+      // stays applied. Reject is the only outcome that touches the page.
+      if (decision === 'rejected') {
+        try {
+          const result = await bridgeRef.current.undoPreview(ownerId, transaction.id);
+          if (undoSucceeded(result)) {
+            patchTransaction(ownerId, transaction.id, { status: 'undone', enabled: false });
+          } else {
+            patchTransaction(ownerId, transaction.id, { errorCode: 'undo-failed' });
+          }
+        } catch {
+          patchTransaction(ownerId, transaction.id, { errorCode: 'undo-failed' });
+        }
+      }
+    }
+    markDecision(ownerId, (existing) => ({
       ...existing,
       messages: existing.messages.map((message: ChatMessage) =>
         message.id === messageId ? { ...message, decision } : message,
       ),
       updatedAt: Date.now(),
     }));
+  }, [patchTransaction, session]);
+
+  const settlePending = useCallback(async (): Promise<SettledState | null> => {
+    const current = sessionRef.current;
+    if (!session || !current || current.id !== session.id) return null;
+    const ownerId = current.id;
+    const pending = pendingForSession(current).filter((proposal) => {
+      const transaction = current.previewTransactions.find(
+        (item) => item.id === proposal.transactionId,
+      );
+      return transaction?.enabled === true;
+    });
+    if (pending.length === 0) return { rejected: 0, messages: current.messages, transactions: current.previewTransactions };
+    // Newest first: later transactions layer on top of earlier ones, so
+    // undoing in reverse leaves the earlier changes standing until their turn.
+    const ordered = [...pending].sort((a, b) => b.order - a.order);
+    const rolledBack = new Set<string>();
+    for (const proposal of ordered) {
+      try {
+        await bridgeRef.current.undoPreview(ownerId, proposal.transactionId);
+      } catch {
+        // A failed rollback still counts as rejected: the user did not keep it,
+        // and the local record must not claim it is applied.
+      }
+      rolledBack.add(proposal.transactionId);
+    }
+    const rejectedIds = new Set(ordered.map((proposal) => proposal.messageId));
+    const messages = current.messages.map((message) =>
+      message.decision === undefined && rejectedIds.has(message.id)
+        ? { ...message, decision: 'rejected' as DesignDecision }
+        : message,
+    );
+    const transactions = current.previewTransactions.map((transaction) =>
+      rolledBack.has(transaction.id)
+        ? { ...transaction, status: 'undone' as PreviewRuntimeStatus, enabled: false, updatedAt: Date.now() }
+        : transaction,
+    );
+    updateSessionRef.current(ownerId, (existing) => ({
+      ...existing,
+      messages,
+      previewTransactions: transactions,
+      updatedAt: Date.now(),
+    }));
+    return { rejected: ordered.length, messages, transactions };
+  }, [session]);
+
+  const revertTo = useCallback(async (userMessageId: string): Promise<RevertSnapshot | null> => {
+    const current = sessionRef.current;
+    if (!session || !current || current.id !== session.id) return null;
+    const index = current.messages.findIndex(
+      (message) => message.id === userMessageId && message.role === 'user',
+    );
+    if (index < 0) return null;
+    const ownerId = current.id;
+    const snapshot: RevertSnapshot = {
+      messages: current.messages,
+      previewTransactions: current.previewTransactions,
+    };
+    const live = current.previewTransactions.filter(
+      (transaction) => transaction.enabled && transaction.sessionId === ownerId,
+    );
+    if (live.length > 0) {
+      try {
+        await bridgeRef.current.resetPreviews(
+          ownerId,
+          live.map((transaction) => transaction.id),
+        );
+      } catch {
+        // The rewind still happens locally; a failed bridge reset leaves the
+        // page styled until the next session reset, and the snapshot can put
+        // the transactions back.
+      }
+    }
+    updateSessionRef.current(ownerId, (existing) => ({
+      ...existing,
+      messages: existing.messages.slice(0, index),
+      previewTransactions: existing.previewTransactions.map((transaction) =>
+        transaction.enabled && transaction.sessionId === ownerId
+          ? { ...transaction, enabled: false, status: 'reset' as PreviewRuntimeStatus, updatedAt: Date.now() }
+          : transaction,
+      ),
+      updatedAt: Date.now(),
+    }));
+    return snapshot;
   }, [session]);
 
   const previews = useMemo(() => {
@@ -261,6 +399,15 @@ export function usePreviewController({ bridge, session, updateSession, autoEnabl
         errorCode: transaction.errorCode,
       });
     }
+    for (const proposal of proposalsIn(session?.messages ?? [], session?.previewTransactions ?? [])) {
+      const existing = map.get(proposal.messageId);
+      if (!existing) continue;
+      map.set(proposal.messageId, {
+        ...existing,
+        proposalState: proposal.state,
+        summaryLines: proposalSummaryLines(proposal),
+      });
+    }
     return map;
   }, [session]);
 
@@ -269,5 +416,10 @@ export function usePreviewController({ bridge, session, updateSession, autoEnabl
     [session],
   );
 
-  return { applyCompletion, undo, reset, decide, previews, activeCount };
+  const pendingCount = useMemo(
+    () => pendingForSession(session).length,
+    [session],
+  );
+
+  return { applyCompletion, undo, reset, decide, settlePending, revertTo, previews, activeCount, pendingCount };
 }

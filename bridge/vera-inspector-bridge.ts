@@ -11,10 +11,17 @@
  * - Overlays use Shadow DOM for CSS isolation; positions recomputed on
  *   scroll/resize/rAF while frozen.
  * - HTML hover: dashed outline. Selection: solid outline + numbered label.
- * - Frozen click interception: capture-phase preventDefault/stopPropagation,
- *   link/navigation + form-submit prevention. No blanket keyboard blocking —
- *   only the Freeze shortcut (Ctrl/Cmd+Shift+F primary, Alt+Shift+F legacy)
- *   and Escape (clear hover) are handled.
+ * - Freeze is a real inert state, not a click block. A pointer shield inside
+ *   the shadow host (pointer-events:auto, toggled on freeze) stops the page
+ *   from receiving pointer events at all, so :hover CSS, hover handlers,
+ *   clicks, drags and context menus all stop. Window-capture blockers stop
+ *   keyboard, focus, editing, paste and drop. A document-level stylesheet
+ *   pauses CSS animations/transitions and hides the caret. Scrolling stays
+ *   allowed (it changes no app state and is needed to reach off-screen
+ *   components). JS timers, rAF loops, sockets and video playback keep
+ *   running — stopping those would require global patching, which is out of
+ *   scope and can outlive the freeze. The Freeze shortcut
+ *   (Ctrl/Cmd+Shift+F primary, Alt+Shift+F legacy) and Escape remain live.
  *
  * R3F / Konva: Vera must register runtime refs (see Manual Integration
  * Checklist). Without registration, 3D/Konva modes report explicit
@@ -1116,6 +1123,13 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
   shadow.appendChild(style);
   const layer = document.createElement('div');
   shadow.appendChild(layer);
+  // Pointer shield. Lives in the shadow root so page CSS cannot restyle it, and
+  // stays `pointer-events:none` until freeze, at which point the host (which is
+  // itself pointer-events:none) opts this single child back in.
+  const shield = document.createElement('div');
+  shield.setAttribute('data-vera-inspector', 'freeze-shield');
+  shield.style.cssText = 'position:fixed;inset:0;pointer-events:none;';
+  shadow.appendChild(shield);
   function mountHost() {
     if (!host.isConnected && document.body) document.body.appendChild(host);
   }
@@ -1721,7 +1735,18 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
       rafHandle = requestAnimationFrame(() => {
         rafPending = false;
         rafHandle = null;
-        if (frozen) refreshAllBoxes();
+        if (!frozen) return;
+        if (pendingPointer && mode === 'html') {
+          const { x, y, target } = pendingPointer;
+          pendingPointer = null;
+          const t = hitTestPage(x, y, target);
+          if (t) {
+            hoverEl = t;
+          } else if (hoverEl) {
+            clearHover();
+          }
+        }
+        refreshAllBoxes();
       });
     } catch {
       rafPending = false;
@@ -1729,26 +1754,59 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
     }
   }
 
-  // ---- Frozen listeners (attached ONLY while frozen, §10.2) ----
+  // ---- Frozen listeners (attached ONLY while frozen) ----
+  /**
+   * Resolve the page element under (x,y) while the shield is swallowing pointer
+   * events. `e.target` is useless here: at document level the shield retargets
+   * to the host, so every hit would look like "the overlay". Briefly drop the
+   * shield, ask the browser, then restore it. `elementsFromPoint` flushes
+   * pending style, so the one-off pointer-events toggle is visible immediately.
+   *
+   * The event target is kept as a fallback for environments without geometric
+   * hit-testing (jsdom), where nothing intercepts the pointer and `e.target` is
+   * still the real element.
+   */
+  function hitTestPage(x: number, y: number, fallback: EventTarget | null): Element | null {
+    if (typeof document.elementsFromPoint === 'function') {
+      const previous = shield.style.pointerEvents;
+      shield.style.pointerEvents = 'none';
+      try {
+        for (const el of document.elementsFromPoint(x, y)) {
+          if (el === host || host.contains(el)) continue;
+          return el;
+        }
+        return null;
+      } catch {
+        /* fall through to the event target */
+      } finally {
+        shield.style.pointerEvents = previous;
+      }
+    }
+    if (fallback instanceof Element && fallback !== host && !host.contains(fallback)) return fallback;
+    return null;
+  }
+
+  let pendingPointer: { x: number; y: number; target: EventTarget | null } | null = null;
+
   function onMouseMove(e: MouseEvent) {
     if (!frozen || mode !== 'html') return;
-    const t = e.target as Element | null;
-    if (!t || t === host || host.contains(t)) return;
-    hoverEl = t;
+    // Hit-testing is deferred into the rAF so the shield toggle costs at most
+    // one forced reflow per frame instead of one per mousemove event.
+    pendingPointer = { x: e.clientX, y: e.clientY, target: e.target };
     scheduleRefresh();
   }
 
   function onClick(e: MouseEvent) {
     if (!frozen) return;
-    // Safe interception (§10.3): capture-phase, block Vera side effects.
+    // Safe interception: capture-phase, block Vera side effects.
     e.preventDefault();
     e.stopPropagation();
     if (mode !== 'html') {
       handleCanvasClick(e);
       return;
     }
-    const t = e.target as Element | null;
-    if (!t || t === host || host.contains(t)) return;
+    const t = hitTestPage(e.clientX, e.clientY, e.target);
+    if (!t) return;
     selectHtmlElement(t);
   }
 
@@ -1757,6 +1815,37 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
       e.preventDefault();
       e.stopPropagation();
     }
+  }
+
+  /** Swallow an event at the very top of the capture phase. */
+  function blockFrozenEvent(e: Event) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  function onFrozenKeyDown(e: KeyboardEvent) {
+    // The Freeze shortcut and Escape stay live so the user can get out again.
+    if (isFreezeKey(e)) return;
+    if (e.key === 'Escape') return;
+    blockFrozenEvent(e);
+  }
+
+  function onFrozenKeyUp(e: KeyboardEvent) {
+    blockFrozenEvent(e);
+  }
+
+  function onFrozenKeyPress(e: KeyboardEvent) {
+    blockFrozenEvent(e);
+  }
+
+  function onFrozenEdit(e: Event) {
+    blockFrozenEvent(e);
+  }
+
+  function onFrozenPointer(e: Event) {
+    // Backstop only: the shield already stops these. Kept so a browser that
+    // mis-hit-tests a fixed overlay still cannot hand the page a live pointer.
+    blockFrozenEvent(e);
   }
 
   function handleCanvasClick(e: MouseEvent) {
@@ -1850,7 +1939,46 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
     }
   }
 
+  const FREEZE_STYLE_TEXT = `
+*, *::before, *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+  caret-color: transparent !important;
+  scroll-behavior: auto !important;
+}
+`;
+  let freezeStyle: HTMLStyleElement | null = null;
+
+  function applyFreezeVisuals(on: boolean) {
+    shield.style.pointerEvents = on ? 'auto' : 'none';
+    if (on) {
+      if (!freezeStyle) {
+        const parent = document.head ?? document.documentElement;
+        if (parent) {
+          freezeStyle = document.createElement('style');
+          freezeStyle.setAttribute('data-vera-inspector', 'freeze-style');
+          freezeStyle.textContent = FREEZE_STYLE_TEXT;
+          parent.appendChild(freezeStyle);
+        }
+      }
+    } else if (freezeStyle) {
+      freezeStyle.remove();
+      freezeStyle = null;
+    }
+  }
+
   function attach() {
+    // Window-capture blockers fire before anything the page registered, so
+    // stopPropagation here keeps the event away from document/body/target.
+    window.addEventListener('keydown', onFrozenKeyDown, { capture: true });
+    window.addEventListener('keyup', onFrozenKeyUp, { capture: true });
+    window.addEventListener('keypress', onFrozenKeyPress, { capture: true });
+    for (const type of ['beforeinput', 'input', 'change', 'focusin', 'focusout', 'paste', 'cut', 'drop', 'dragstart']) {
+      window.addEventListener(type, onFrozenEdit, { capture: true });
+    }
+    for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'dblclick', 'contextmenu']) {
+      window.addEventListener(type, onFrozenPointer, { capture: true });
+    }
     document.addEventListener('mousemove', onMouseMove, { capture: true, passive: true });
     document.addEventListener('click', onClick, { capture: true });
     document.addEventListener('submit', onSubmit, { capture: true });
@@ -1859,22 +1987,45 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
   }
 
   function detach() {
+    window.removeEventListener('keydown', onFrozenKeyDown, { capture: true });
+    window.removeEventListener('keyup', onFrozenKeyUp, { capture: true });
+    window.removeEventListener('keypress', onFrozenKeyPress, { capture: true });
+    for (const type of ['beforeinput', 'input', 'change', 'focusin', 'focusout', 'paste', 'cut', 'drop', 'dragstart']) {
+      window.removeEventListener(type, onFrozenEdit, { capture: true });
+    }
+    for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'dblclick', 'contextmenu']) {
+      window.removeEventListener(type, onFrozenPointer, { capture: true });
+    }
     document.removeEventListener('mousemove', onMouseMove, { capture: true });
     document.removeEventListener('click', onClick, { capture: true });
     document.removeEventListener('submit', onSubmit, { capture: true });
     window.removeEventListener('scroll', scheduleRefresh, { capture: true });
     window.removeEventListener('resize', scheduleRefresh);
+    applyFreezeVisuals(false);
+  }
+
+  function blurActiveElement() {
+    try {
+      const active = document.activeElement as HTMLElement | null;
+      if (active && active !== document.body && typeof active.blur === 'function') active.blur();
+    } catch {
+      /* focus may be inside a cross-origin frame */
+    }
   }
 
   function setFrozen(next: boolean, requestId?: string) {
     const changed = next !== frozen;
     frozen = next;
-    if (frozen && changed) attach();
+    if (frozen && changed) {
+      applyFreezeVisuals(true);
+      blurActiveElement();
+      attach();
+    }
     if (!frozen) {
       detach();
       clearHover();
       if (changed) {
-        // Freeze OFF is a canonical live-state reset (§9.4): clear live state.
+        // Freeze OFF is a canonical live-state reset: clear live state.
         clearAll();
         layer.innerHTML = '';
         selBoxes.clear();
@@ -1927,6 +2078,7 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
       frozen = false;
       detach();
     }
+    applyFreezeVisuals(false);
     removeAllPreviewLayers();
   }
 

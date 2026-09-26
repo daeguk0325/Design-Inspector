@@ -1,6 +1,6 @@
 // Session/message model tests (§§17, 18, 19.6): raw vs transmission, pin order.
 import { describe, expect, it } from 'vitest';
-import { latestUserRequest, pinnedInOrder } from './models.ts';
+import { latestUserRequest } from './models.ts';
 import type { ChatMessage, InspectorSession } from './models.ts';
 import { buildTransmissionPrompt } from '../ollama/client.ts';
 import {
@@ -47,7 +47,7 @@ describe('message model', () => {
       targetUrl: '',
       model: '',
       messages: [
-        { id: 'a', role: 'user' as const, content: '({1}) looks like a citation but is raw user text', citations: [], pinned: false, pinnedAt: null, createdAt: 1 },
+        { id: 'a', role: 'user' as const, content: '({1}) looks like a citation but is raw user text', citations: [], createdAt: 1 },
       ],
       previewTransactions: [],
       persistedActiveSelectionIds: [],
@@ -55,25 +55,6 @@ describe('message model', () => {
       updatedAt: 0,
     };
     expect(latestUserRequest(s)).toBe('({1}) looks like a citation but is raw user text');
-  });
-
-  it('pinnedInOrder reconstructs explicit pin order after reload', () => {
-    const s = {
-      id: 's',
-      title: 't',
-      targetUrl: '',
-      model: '',
-      messages: [
-        { id: 'a', role: 'user' as const, content: 'a', citations: [], pinned: true, pinnedAt: 300, createdAt: 1 },
-        { id: 'b', role: 'user' as const, content: 'b', citations: [], pinned: true, pinnedAt: 100, createdAt: 2 },
-        { id: 'c', role: 'user' as const, content: 'c', citations: [], pinned: false, pinnedAt: null, createdAt: 3 },
-      ],
-      previewTransactions: [],
-      persistedActiveSelectionIds: [],
-      createdAt: 0,
-      updatedAt: 0,
-    };
-    expect(pinnedInOrder(s).map((m) => m.id)).toEqual(['b', 'a']);
   });
 
   it('maps a contact sheet and individual images to citation numbers', () => {
@@ -122,14 +103,12 @@ describe('message model extensions', () => {
       role: 'assistant',
       content: 'proposed change',
       citations: [],
-      pinned: false,
-      pinnedAt: null,
       status: 'completed',
       createdAt: 5,
-      decision: 'needs-revision',
+      decision: 'accepted',
       previewTransactionId: 'tx-1',
     };
-    expect(message.decision).toBe('needs-revision');
+    expect(message.decision).toBe('accepted');
     expect(message.previewTransactionId).toBe('tx-1');
   });
 
@@ -139,8 +118,6 @@ describe('message model extensions', () => {
       role: 'user',
       content: 'plain',
       citations: [],
-      pinned: false,
-      pinnedAt: null,
       createdAt: 5,
     };
     expect(message.decision).toBeUndefined();
@@ -159,8 +136,6 @@ describe('message model extensions', () => {
           role: 'user',
           content: 'make it blue',
           citations: [],
-          pinned: false,
-          pinnedAt: null,
           createdAt: 1,
         },
       ],
@@ -171,7 +146,6 @@ describe('message model extensions', () => {
     };
     expect(session.previewTransactions ?? []).toHaveLength(1);
     expect(latestUserRequest(session)).toBe('make it blue');
-    expect(pinnedInOrder(session)).toEqual([]);
   });
 });
 

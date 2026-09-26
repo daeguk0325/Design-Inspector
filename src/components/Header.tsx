@@ -20,7 +20,11 @@ export interface HeaderProps {
   onOpenMore: () => void;
   sessionCount: number;
   previewCount?: number;
+  /** Proposals still waiting on a decision. */
+  pendingCount?: number;
   onResetPreviews?: () => void;
+  onOpenChangeLog?: () => void;
+  changeCount?: number;
   viewport?: ViewportPreset;
   onViewportChange?: (preset: ViewportPreset) => void;
   viewportDisabled?: boolean;
@@ -136,6 +140,26 @@ export function Header(p: HeaderProps) {
               onClick={() => p.onResetPreviews?.()}
             >
               Reset
+            </button>
+          </div>
+        )}
+        {p.onOpenChangeLog && (
+          <div className="topgroup" role="group" aria-label="Change log">
+            <button
+              type="button"
+              className={`pill changelog-pill ${(p.changeCount ?? 0) > 0 ? 'on' : ''}`}
+              title={`${p.changeCount ?? 0} accepted change(s)`}
+              onClick={p.onOpenChangeLog}
+            >
+              변경 내역
+              {p.changeCount !== undefined && p.changeCount > 0 && (
+                <span className="changelog-count">{p.changeCount}</span>
+              )}
+              {(p.pendingCount ?? 0) > 0 && (
+                <span className="changelog-pending" title="Waiting for a decision">
+                  {p.pendingCount}
+                </span>
+              )}
             </button>
           </div>
         )}

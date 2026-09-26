@@ -20,7 +20,6 @@ function rec(id: string, order: number): SelectionRecord {
 
 function sessionWith(opts: {
   userTexts: string[];
-  pins?: number[];
   activeExtra?: SelectionRecord[];
 }): InspectorSession {
   const messages = opts.userTexts.map((t, i) => ({
@@ -28,8 +27,6 @@ function sessionWith(opts: {
     role: 'user' as const,
     content: t,
     citations: [],
-    pinned: (opts.pins ?? []).includes(i),
-    pinnedAt: (opts.pins ?? []).includes(i) ? 1000 + (opts.pins ?? []).indexOf(i) : null,
     createdAt: i,
   }));
   return {
@@ -66,20 +63,12 @@ describe('buildAgentPrompt', () => {
     expect(out.match(/selectionId: a/g)?.length).toBe(1); // deduped
   });
 
-  it('omits Constraints entirely when nothing is pinned', () => {
-    const s = sessionWith({ userTexts: ['hi'] });
-    expect(buildAgentPrompt({ session: s, active: [] })).not.toContain('## Constraints');
-  });
-
-  it('orders constraints by pin order, not message order', () => {
-    const s = sessionWith({ userTexts: ['one', 'two', 'three'], pins: [2, 0] });
+  it('carries only the latest request and never a constraints section', () => {
+    const s = sessionWith({ userTexts: ['one', 'two', 'three'] });
     const out = buildAgentPrompt({ session: s, active: [] });
-    const iThree = out.indexOf('three');
-    // pin order: message 2 pinned first (pinnedAt 1000), message 0 second (1001)
-    expect(out).toContain('## Constraints');
-    expect(iThree).toBeLessThan(out.indexOf('one', iThree));
-    const iOne = out.indexOf('2. one');
-    expect(iOne).toBeGreaterThan(-1);
+    expect(out).not.toContain('## Constraints');
+    expect(out).toContain('## Request');
+    expect(out).toContain('three');
   });
 
   it('serializes extra deterministically (sorted keys) with one trailing newline', () => {
@@ -106,7 +95,7 @@ describe('buildAgentPrompt', () => {
 
 describe('buildRawTranscript', () => {
   it('exports conversation without the agent transformation', () => {
-    const s = sessionWith({ userTexts: ['hello'], pins: [] });
+    const s = sessionWith({ userTexts: ['hello'] });
     const raw = buildRawTranscript(s);
     expect(raw).toContain('### user');
     expect(raw).toContain('hello');

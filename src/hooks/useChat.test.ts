@@ -2,6 +2,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DESIGN_INSPECTOR_SYSTEM_PROMPT, MAX_RESPONSE_CHARS } from '../ollama/client.ts';
+import type { PreviewTransaction } from '../preview/transaction.ts';
 import { MAX_PREVIEW_BLOCK_CHARS } from '../preview/contract.ts';
 import type { SelectionRecord } from '../protocol/types.ts';
 import type { ChatMessage } from '../state/models.ts';
@@ -191,12 +192,73 @@ function record(overrides: Partial<SelectionRecord> = {}): SelectionRecord {
 const SELECTION = record();
 const DISPLAY_NUMBERS = new Map([['s1', 1]]);
 
+const PREVIEW_TRANSACTION: PreviewTransaction = {
+  id: 'tx-1',
+  assistantId: 'a-prev',
+  userMessageId: 'u-prev',
+  sessionId: 'session-a',
+  targetUrl: 'http://target.test',
+  routeKey: '/',
+  changes: [
+    {
+      target: 1,
+      anchor: {
+        elementKey: 'html:testid:cta',
+        routeKey: '/',
+        mode: 'html',
+        tagName: 'button',
+        id: '',
+        testId: 'cta',
+        path: '',
+      },
+      declarations: { padding: '12px' },
+    },
+  ],
+  enabled: true,
+  status: 'applied',
+  createdAt: 1,
+  updatedAt: 1,
+};
+
+function transaction(): [PreviewTransaction] {
+  return [PREVIEW_TRANSACTION];
+}
+
+function decidedMessage(): ChatMessage {
+  return {
+    id: 'a-prev',
+    role: 'assistant',
+    content: '이전 답변',
+    citations: [
+      {
+        selectionId: 's1',
+        elementKey: 'html:testid:cta',
+        component: 'PrimaryButton',
+        file: null,
+        line: null,
+        mode: 'html',
+        displayNumber: 1,
+      },
+    ],
+    status: 'completed',
+    decision: 'accepted',
+    createdAt: 1,
+    previewTransactionId: 'tx-1',
+  };
+}
+
+function lastSystemPrompt(log: RecordedRequest[]): string {
+  return log.at(-1)?.messages.find((m) => m.role === 'system')?.content ?? '';
+}
+
 async function send(
   api: () => ChatApi,
   store: Store,
   sessionId: string,
   text: string,
   onComplete?: OnChatComplete,
+  transactions: readonly PreviewTransaction[] = [],
+  history?: ChatMessage[],
 ): Promise<boolean> {
   let accepted = false;
   await act(async () => {
@@ -208,39 +270,17 @@ async function send(
       undefined,
       store.appendMessage,
       store.patchMessage,
-      store.messages.get(sessionId) ?? [],
+      history ?? store.messages.get(sessionId) ?? [],
       BASE_URL,
       MODEL,
       onComplete,
+      transactions,
     );
   });
   await settle();
   return accepted;
 }
 
-async function retry(
-  api: () => ChatApi,
-  store: Store,
-  sessionId: string,
-  userMsg: ChatMessage,
-  citations: ChatMessage['citations'],
-  onComplete?: OnChatComplete,
-): Promise<void> {
-  await act(async () => {
-    await api().retry(
-      sessionId,
-      userMsg,
-      citations,
-      store.messages.get(sessionId) ?? [],
-      BASE_URL,
-      MODEL,
-      store.appendMessage,
-      store.patchMessage,
-      onComplete,
-    );
-  });
-  await settle();
-}
 
 function messagesOf(store: Store, sessionId: string): ChatMessage[] {
   return store.messages.get(sessionId) ?? [];
@@ -329,33 +369,29 @@ describe('useChat streaming with the preview sidecar', () => {
     expect(assistant.citations[0]?.displayNumber).toBe(1);
   });
 
-  it('stores the citations on a retried answer too', async () => {
+  it('carries the settled decisions into the next request', async () => {
+    // Settling happens before the prompt is built, so the transactions the
+    // caller passes in have to reach the system message.
     const store = createStore();
-    stubFetch(() => contentResponse(['첫 응답\n\n']));
+    const log = stubFetch(() => contentResponse(['응답\n\n']));
     const api = mountChat();
-    expect(await send(api, store, 'session-a', 'make ({1}) roomier')).toBe(true);
-    const firstAttempt = lastAssistant(store, 'session-a');
-    expect(firstAttempt.citations).toHaveLength(1);
+    await send(api, store, 'session-a', '첫 요청');
+    expect(lastSystemPrompt(log)).not.toContain('PrimaryButton: padding 12px');
 
-    stubFetch(() => contentResponse(['두 번째 응답 ({1})\n\n']));
-    await act(async () => {
-      await api().retry(
-        'session-a',
-        userMessage(store, 'session-a'),
-        userMessage(store, 'session-a').citations,
-        store.messages.get('session-a') ?? [],
-        BASE_URL,
-        MODEL,
-        store.appendMessage,
-        store.patchMessage,
-      );
-    });
-
-    const retried = lastAssistant(store, 'session-a');
-    expect(retried.id).not.toBe(firstAttempt.id);
-    expect(retried.citations).toEqual(userMessage(store, 'session-a').citations);
+    const withDecision = [decidedMessage(), ...(store.messages.get('session-a') ?? [])];
+    await send(
+      api,
+      store,
+      'session-a',
+      '두번째 요청',
+      undefined,
+      transaction(),
+      withDecision,
+    );
+    const second = lastSystemPrompt(log);
+    expect(second).toContain('Changes already decided in this session');
+    expect(second).toContain('- [accept] PrimaryButton: padding 12px');
   });
-
   it('reports a clean completion without a candidate when no block is emitted', async () => {
     const store = createStore();
     stubFetch(() => contentResponse(['## 디자이너 전달문\n\n본문 [1]\n']));
@@ -483,65 +519,7 @@ describe('useChat streaming with the preview sidecar', () => {
   });
 });
 
-describe('useChat retry and attempt identity guards', () => {
-  it('retries with the original citation snapshots and a fresh assistant attempt', async () => {
-    const store = createStore();
-    const log = stubFetch((index) =>
-      index === 0 ? new Response('', { status: 500 }) : contentResponse(blockFragments(BLOCK_JSON)),
-    );
-    const api = mountChat();
-    const onSendComplete = vi.fn<(completion: ChatCompletion) => void>();
-    await send(api, store, 'session-a', '시각 개선안', onSendComplete);
-    const failed = lastAssistant(store, 'session-a');
-    const user = userMessage(store, 'session-a');
-    expect(failed.status).toBe('error');
-    expect(onSendComplete).not.toHaveBeenCalled();
-
-    const onRetryComplete = vi.fn<(completion: ChatCompletion) => void>();
-    await retry(api, store, 'session-a', user, user.citations, onRetryComplete);
-    const attempts = assistantMessages(store, 'session-a');
-    const retried = attempts.at(-1);
-    expect(attempts).toHaveLength(2);
-    expect(retried?.id).not.toBe(failed.id);
-    expect(retried?.status).toBe('completed');
-    expect(retried?.content).toBe(VISIBLE);
-    expect(failed.content).toBe('Error: Ollama chat failed: HTTP 500');
-    expect(log[1]?.messages.at(-1)?.content).toContain(
-      'Inspected UI citations:\n({1}) PrimaryButton — src/ui/Button.tsx:42 (mode: html, id: s1)',
-    );
-    expect(onRetryComplete).toHaveBeenCalledTimes(1);
-    expect(onRetryComplete).toHaveBeenCalledWith({
-      sessionId: 'session-a',
-      assistantId: retried?.id,
-      userMessageId: user.id,
-      candidate: CANDIDATE,
-      citations: user.citations,
-      content: VISIBLE,
-      truncated: false,
-      errored: false,
-    });
-  });
-
-  it('validates a retried block against the original citation numbers only', async () => {
-    const store = createStore();
-    stubFetch((index) =>
-      index === 0
-        ? new Response('', { status: 500 })
-        : contentResponse(
-            blockFragments(JSON.stringify({ version: 1, rules: [{ target: 9, declarations: { color: 'red' } }] })),
-          ),
-    );
-    const api = mountChat();
-    await send(api, store, 'session-a', '시각 개선안');
-    const user = userMessage(store, 'session-a');
-    const onComplete = vi.fn<(completion: ChatCompletion) => void>();
-    await retry(api, store, 'session-a', user, user.citations, onComplete);
-    expect(lastAssistant(store, 'session-a').content).toBe(VISIBLE);
-    expect(onComplete).toHaveBeenCalledTimes(1);
-    expect(onComplete.mock.calls[0]?.[0].candidate).toBeNull();
-  });
-
-  it('keeps an interrupted attempt from publishing content or a completion in a newer session', async () => {
+describe('useChat attempt identity guards', () => {  it('keeps an interrupted attempt from publishing content or a completion in a newer session', async () => {
     const store = createStore();
     const first = manualResponse();
     const log = stubFetch((index) => (index === 0 ? first.response : contentResponse(blockFragments(BLOCK_JSON))));

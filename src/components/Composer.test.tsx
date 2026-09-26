@@ -329,3 +329,42 @@ describe.skipIf(composerModule === null)('Composer', () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 });
+
+describe('Composer rewind seed', () => {
+  it('starts with the restored text when a rewind seeds the composer', async () => {
+    const { Composer } = composerModule!;
+    const { container } = mount(
+      <Composer
+        streaming={false}
+        canSend
+        onSend={vi.fn(async () => true)}
+        onStop={vi.fn()}
+        selections={[]}
+        seed={{ text: '버튼을 더 크게', nonce: 1 }}
+      />,
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const editable = container.querySelector<HTMLElement>('[contenteditable]');
+    expect(editable?.textContent).toBe('버튼을 더 크게');
+  });
+
+  it('starts empty without a seed', async () => {
+    const { Composer } = composerModule!;
+    const { container } = mount(
+      <Composer
+        streaming={false}
+        canSend
+        onSend={vi.fn(async () => true)}
+        onStop={vi.fn()}
+        selections={[]}
+      />,
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const editable = container.querySelector<HTMLElement>('[contenteditable]');
+    expect(editable?.textContent ?? '').toBe('');
+  });
+});

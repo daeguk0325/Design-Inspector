@@ -1,10 +1,12 @@
 // Deterministic `Copy for Agent` export (§19). No AI call.
-// Inputs: latest raw user request + reconciled active citations + pinned
-// constraints in pin order + fixed template. Stable serialization of `extra`.
+// Inputs: latest raw user request + reconciled active citations + a fixed
+// template. Stable serialization of `extra`.
+//
+// Pin-based constraints are gone: the session's accepted changes are the
+// durable record now, and they are exported through the change log instead.
 
 import type { SelectionRecord } from '../protocol/types.ts';
-import type { ChatMessage } from '../state/models.ts';
-import { latestUserRequest, pinnedInOrder } from '../state/models.ts';
+import { latestUserRequest } from '../state/models.ts';
 import { sortByFirstAdded } from '../state/reconcile.ts';
 import type { InspectorSession } from '../state/models.ts';
 
@@ -57,7 +59,6 @@ export function buildAgentPrompt(input: ExportInput): string {
         return true;
       }))
     : [];
-  const pins: ChatMessage[] = pinnedInOrder(input.session);
 
   const L = EXPORT_LINE_ENDING;
   const out: string[] = [];
@@ -79,14 +80,6 @@ export function buildAgentPrompt(input: ExportInput): string {
     });
     out.push('');
   }
-  if (pins.length > 0) {
-    out.push('## Constraints');
-    pins.forEach((m, i) => {
-      const oneLine = m.content.replace(/\s+/g, ' ').trim().slice(0, 500);
-      out.push(`${i + 1}. ${oneLine}`);
-    });
-    out.push('');
-  }
   // Deterministic trailing newline: exactly one.
   return out.join(L).replace(/\n+$/, '\n');
 }
@@ -95,7 +88,7 @@ export function buildRawTranscript(session: InspectorSession): string {
   const L = EXPORT_LINE_ENDING;
   const lines: string[] = [`# Transcript — ${session.title}`, ''];
   for (const m of session.messages) {
-    lines.push(`### ${m.role}${m.pinned ? ' (pinned)' : ''}`);
+    lines.push(`### ${m.role}`);
     lines.push(m.content);
     if (m.citations.length > 0) {
       lines.push('');

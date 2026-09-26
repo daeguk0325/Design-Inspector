@@ -2,16 +2,14 @@
 // session-switch race guards, explicit message lifecycle (§16).
 
 import { useCallback, useRef, useState } from 'react';
-import { normalizeBaseUrl, streamChat } from '../ollama/client.ts';
+import { streamChat } from '../ollama/client.ts';
 import type { ChatMessage, CitationSnapshot } from '../state/models.ts';
 import { citationFromRecord, makeId } from '../state/models.ts';
 import type { SelectionRecord } from '../protocol/types.ts';
 import type { VisualTransmission } from '../ollama/visualContext.ts';
 import { PreviewSidecarParser } from '../preview/index.ts';
 import type { PreviewCandidate } from '../preview/index.ts';
-
-const MAX_RETRY_VISUALS = 8;
-const MAX_RETRY_VISUAL_BASE64 = 16 * 1024 * 1024;
+import type { PreviewTransaction } from '../preview/transaction.ts';
 
 export interface ChatCompletion {
   sessionId: string;
@@ -40,19 +38,9 @@ export interface ChatApi {
     baseUrl: string,
     model: string,
     onComplete?: OnChatComplete,
+    transactions?: readonly PreviewTransaction[],
   ) => Promise<boolean>;
   stop: () => void;
-  retry: (
-    sessionId: string,
-    userMsg: ChatMessage,
-    citations: CitationSnapshot[],
-    history: ChatMessage[],
-    baseUrl: string,
-    model: string,
-    appendMessage: (sessionId: string, m: ChatMessage) => void,
-    patchMessage: (sessionId: string, id: string, patch: Partial<ChatMessage> & { appendContent?: string }) => void,
-    onComplete?: OnChatComplete,
-  ) => Promise<void>;
 }
 
 export function useChat(): ChatApi {
@@ -60,28 +48,10 @@ export function useChat(): ChatApi {
   const abortRef = useRef<AbortController | null>(null);
   const activeSessionRef = useRef<string | null>(null);
   const activeAssistantRef = useRef<string | null>(null);
-  const attemptVisualsRef = useRef(new Map<string, VisualTransmission>());
-  const storeAttemptVisual = useCallback((messageId: string, visual: VisualTransmission) => {
-    attemptVisualsRef.current.set(messageId, visual);
-    let total = 0;
-    for (const value of attemptVisualsRef.current.values()) {
-      total += value.images.reduce((sum, image) => sum + image.length, 0);
-    }
-    while (
-      attemptVisualsRef.current.size > MAX_RETRY_VISUALS ||
-      total > MAX_RETRY_VISUAL_BASE64
-    ) {
-      const oldest = attemptVisualsRef.current.keys().next().value;
-      if (oldest === undefined) break;
-      const removed = attemptVisualsRef.current.get(oldest);
-      attemptVisualsRef.current.delete(oldest);
-      if (removed) total -= removed.images.reduce((sum, image) => sum + image.length, 0);
-    }
-  }, []);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
-    // Status flip to interrupted happens in send/retry finally blocks.
+    // Status flip to interrupted happens in the send finally block.
   }, []);
 
   const runStream = useCallback(
@@ -97,6 +67,7 @@ export function useChat(): ChatApi {
       model: string,
       patchMessage: (sessionId: string, id: string, patch: Partial<ChatMessage> & { appendContent?: string }) => void,
       onComplete: OnChatComplete | undefined,
+      transactions: readonly PreviewTransaction[],
     ) => {
       const ctrl = new AbortController();
       abortRef.current = ctrl;
@@ -130,7 +101,7 @@ export function useChat(): ChatApi {
         onError: (msg) => {
           errored = msg;
         },
-      });
+      }, transactions);
       const wasAborted = ctrl.signal.aborted;
       // Never silently mark interrupted streams successful (§16.7).
       if (isCurrentAttempt()) {
@@ -195,7 +166,8 @@ export function useChat(): ChatApi {
       history: ChatMessage[],
       baseUrl: string,
       model: string,
-      onComplete?: OnChatComplete,
+      onComplete: OnChatComplete | undefined,
+      transactions: readonly PreviewTransaction[] = [],
     ) => {
       if (streaming || abortRef.current) return false; // duplicate-send guard (§16.8)
       const text = rawText;
@@ -208,11 +180,8 @@ export function useChat(): ChatApi {
         role: 'user',
         content: text, // raw text only — citation context added at transmission (§17)
         citations,
-        pinned: false,
-        pinnedAt: null,
         createdAt: Date.now(),
       };
-      if (visual) storeAttemptVisual(userMsg.id, visual);
       appendMessage(sessionId, userMsg);
       const assistantId = makeId('msg');
       appendMessage(sessionId, {
@@ -220,8 +189,6 @@ export function useChat(): ChatApi {
         role: 'assistant',
         content: '',
         citations: [],
-        pinned: false,
-        pinnedAt: null,
         status: 'streaming',
         createdAt: Date.now(),
       });
@@ -237,72 +204,11 @@ export function useChat(): ChatApi {
         model,
         patchMessage,
         onComplete,
+        transactions,
       );
       return true;
     },
-    [streaming, runStream, storeAttemptVisual],
-  );
-
-  const retry = useCallback(
-    async (
-      sessionId: string,
-      userMsg: ChatMessage,
-      citations: CitationSnapshot[],
-      history: ChatMessage[],
-      baseUrl: string,
-      model: string,
-      appendMessage: AppendFn,
-      patchMessage: PatchFn,
-      onComplete?: OnChatComplete,
-    ) => {
-      // §16.9: user request preserved; new assistant attempt; old failed entry stays.
-      if (streaming || abortRef.current) return;
-      const storedVisual = attemptVisualsRef.current.get(userMsg.id);
-      if (
-        storedVisual &&
-        (storedVisual.model !== model || normalizeBaseUrl(storedVisual.endpoint) !== normalizeBaseUrl(baseUrl))
-      ) {
-        appendMessage(sessionId, {
-          id: makeId('msg'),
-          role: 'assistant',
-          content: 'Visual retry was not sent because the Ollama model or endpoint changed.',
-          citations: [],
-          pinned: false,
-          pinnedAt: null,
-          status: 'error',
-          createdAt: Date.now(),
-        });
-        return;
-      }
-      const assistantId = makeId('msg');
-      appendMessage(sessionId, {
-        id: assistantId,
-        role: 'assistant',
-        content: '',
-        citations: [],
-        pinned: false,
-        pinnedAt: null,
-        status: 'streaming',
-        createdAt: Date.now(),
-      });
-      const userIndex = history.findIndex((message) => message.id === userMsg.id);
-      const retryHistory = userIndex >= 0 ? history.slice(0, userIndex) : history;
-      await runStream(
-        sessionId,
-        assistantId,
-        userMsg.id,
-        retryHistory,
-        userMsg.content,
-        citations,
-        storedVisual,
-        baseUrl,
-        model,
-        patchMessage,
-        onComplete,
-      );
-    },
     [streaming, runStream],
   );
-
-  return { streaming, send, stop, retry };
+  return { streaming, send, stop };
 }
