@@ -3,15 +3,21 @@
 Date: 2026-09-26 (update: §9e style facts — measured DOM evidence in the
 transmission prompt, sRGB colour normalization, named visual-transmission failure
 reasons, `:cloud` disclosure).
-Method: `npx tsc -b` (clean) + `npx vitest run` (37 files, 626 tests, all
-passing) + `npm run lint` (0 errors; 12 pre-existing warnings) + `npm run build` +
-real Vera/Launcher/Supervisor E2E + isolated Edge CDP crop/Ollama-payload E2E +
-real-key composer E2E + a 4-arm A/B against a real local 9B vision model
-(see "Live 9B A/B verification") + a real-capture run over the production contact-sheet + crop payload
-(see "Live real-capture verification") + code-trace against the §20.15 and §23
-checklists.
+Method: `npx tsc -b` (clean) + `npx vitest run` (46 files, 931 passing, 2 skipped
+on Windows without symlink privileges) + `npm run lint` (0 errors; 14 pre-existing
+warnings) + `npm run build` + real Vera/Launcher/Supervisor E2E + isolated Edge CDP
+crop/Ollama-payload E2E + real-key composer E2E + a 4-arm A/B against a real local
+9B vision model (see "Live 9B A/B verification") + a real-capture run over the
+production contact-sheet + crop payload (see "Live real-capture verification") +
+code-trace against the §20.15 and §23 checklists.
 A real installed vision model remains a manual environment-specific follow-up for
 the full capture path; the §9e prompt/evidence change is verified above.
+
+**Read this before the older 9B entries below.** Several of them are wrong about
+why the model varied between runs, and one is wrong about what a handoff request
+triggers. The corrections, the measurements behind them, and the two silent
+failures they uncovered are in
+[Generation controls, and what actually caused the run-to-run variation](#generation-controls-and-what-actually-caused-the-run-to-run-variation).
 
 ## Automated results
 
@@ -514,6 +520,10 @@ full repository currently passes 626 tests across 37 files.
 
 ## Live 9B verification of the §9f prompt (§9f, 2026-09-26)
 
+> Superseded on the question of run-to-run variation and on what triggers the
+> handoff block. Kept because the finding below — the facts display shorthand
+> leaking into the visible answer — is real and was never about parameters.
+
 - Model: `hf.co/TaichuAI/ZDTaichu5.0-9B-GGUF:Q8_0` (capabilities include
   `thinking`), `temperature: 0`, `num_predict: 12000`
 - Harness: `scripts/capture-probe-e2e.mjs`, arms G/H/I over the **real** facts,
@@ -743,6 +753,145 @@ its request actually asks for.
   is not accounted for, and the ratio would be optimistic.
 - **Responsive behaviour is out of scope for both channels.** One viewport and
   one screenshot cannot answer it; the prompt says so.
+
+## Generation controls, and what actually caused the run-to-run variation
+
+The app used to send no `options` at all, so every request ran on Ollama's server
+defaults. Three of those defaults turned out to matter, and one belief about them
+was wrong.
+
+### The image was never the cause
+
+An earlier entry in this report attributes the run-to-run variation in whether a
+preview block appears to the screenshots. **That attribution was wrong.** Two
+things were wrong with the experiment behind it, and correcting them moved the
+cause:
+
+- The harness called Ollama directly with its own `options`, so it never exercised
+  what the app sent. It now imports `buildChatControls` from
+  `src/ollama/params.ts` and sends the shipped values.
+- The Bridge mints a random `selectionId` per capture, and `buildTransmissionPrompt`
+  embeds it. Every re-run therefore asked the model a **different question** while
+  the output was read as a stability measurement. The probe now pins the id to
+  `sel-probe-N` and prints a prompt hash, so a repeat run is the same experiment
+  and you can tell when it is not.
+
+With the prompt held fixed, the cause is unambiguous:
+
+| Arm | `options` sent | distinct answers | distinct thinking |
+| --- | --- | --- | --- |
+| G | shipped values | **1 / 5** | **1 / 5** |
+| H | shipped values | **1 / 5** | **1 / 5** |
+| G | omitted | 5 / 5 | 5 / 5 |
+| H | omitted | 5 / 5 | 5 / 5 |
+
+`temperature: 0` is greedy decoding, and greedy decoding does not vary. The
+instability that is present without it is visible in what the runs emit: one G run
+produced the misspelled fence ```design-insector-preview, another produced a plain
+```css fence *and* the machine block — both explicitly forbidden — and two of five
+G runs and four of five H runs emitted no block at all.
+
+**`seed: 42` buys nothing today.** Seeds 43 through 46 produced the identical
+output and the identical `eval_count`. At `temperature: 0` the RNG is never
+drawn from. The field is kept because it is what makes a request reproducible once
+the temperature is raised, and it costs nothing — but "fixed seed ⇒ reproducible"
+is not the mechanism, and a seed sweep cannot measure a rate.
+
+### The context window was quietly too small
+
+`num_ctx` defaults to 4096 on a fresh `ollama serve`. The production payload for
+one turn measures:
+
+| Payload | `prompt_eval_count` |
+| --- | --- |
+| no images | 2897 |
+| 1 contact sheet + 4 crops (54KB base64) | **4245** |
+| the same, with one earlier exchange in the history | **5235** |
+
+Against 8192 that is 51.8% and 63.9% of the window spent before the model writes
+a character. On a default 4096 server the request does not fit at all.
+
+### Two silent failures, both now reported
+
+The second one was found by this verification and had been live the whole time.
+
+1. **Reasoning spent the whole budget.** A 0-byte visible answer with ~17k
+   characters of `thinking`. The stream ended cleanly and the parser never looked
+   at `message.thinking` at all, so it could not have been diagnosed from the app.
+2. **The context window filled and the answer was cut.** `prompt_eval 5235`,
+   `done: length`, `eval 2957` — silently clamped from the 4096 that was sent —
+   and 25 characters of visible content, cut mid-sentence. `MAX_HISTORY_MESSAGES`
+   is 40, a message count rather than a token budget, so nothing prevented it and
+   nothing noticed it. This is the same class of failure as the 0-byte answer
+   reached from the other direction, and it got the same treatment: history is now
+   trimmed against a token estimate before the request, and a short answer that
+   stopped at a cap is reported with the cap that bound it, because
+   `num_predict` and the context window have different fixes.
+
+### What is claimed, and what is not
+
+`repeat_penalty: 1.15` is the weakest claim in the defaults. A repetition loop
+ending in a 0-byte answer was observed at the server default of 1.1, and 1.15
+cleared 43 calls over 16 distinct payloads with 0 empty answers and 0
+`done_reason: length`. But the same failure **did not reproduce** at
+`repeat_penalty: 1.0` in a later run, and the thinking channel still repeated a
+paragraph 6 times at 1.15 and 7 times at 1.0 — never in the visible text, which
+repeats nothing in any of 67 runs. So the penalty is set above the default as
+cheap insurance, not as a proven fix, and `src/ollama/params.ts` says so.
+
+### The handoff block: the wording was not the trigger
+
+Arm I kept producing a block on a handoff request about one run in three, and two
+prompt attempts did not change it. The gate in `src/ollama/intent.ts` now decides
+this from the user's own words, before the model has said anything, and strips the
+block rather than offering it.
+
+Measuring the gate and the model separately is what made the diagnosis usable:
+
+| | Blocks emitted |
+| --- | --- |
+| Raw model, handoff phrasing, **images attached** | **3 / 9** |
+| Raw model, the identical text, **no images** | **0 / 10** |
+| App layer, the same phrasings, gate on | **0 / 8** |
+
+**The images are the trigger, not the wording.** The text-only arm I in the probe
+was reporting zero because it had no images, which is why the probe and the app
+disagreed for so long. A block is only offered when a change cue survives the
+request, and a negative rule cannot cost a real request its preview — the gate
+suppresses 8 of 9 phrasings and correctly allows the mixed
+`전달문으로 정리하고 간격은 16px로 늘려줘`.
+
+The gate's scope is deliberately one-directional. Only rules that *suppress* a
+block exist, because a "you must have said one of these words" rule would invent a
+false negative for a request like `이거 좀 어색한데` and quietly stop helping.
+
+### The contrast caveat reaches the prompt and not always the answer
+
+`checkout-shadowed` in the probe target carries a real `box-shadow`, and the ratio
+is computed from an ancestor background walk that steps straight over one. In a
+real browser the bridge now reports it, and the prompt token is exact:
+
+```
+contrast 3.35:1 min 4.5 fail (shadow behind)
+```
+
+The neighbouring element with the same 3.35:1 ratio and no shadow correctly gets
+`min 3 pass` with no suffix, so the caveat is placed only where it belongs.
+
+**It does not reliably survive to the user.** The thinking channel wrote "fails the
+minimum 4.5 requirement (shadow behind)" in 5 of 5 arm-G runs, and the visible
+answer mentioned a shadow in 0 of 5, and in 0 of 4 paraphrase runs that discussed
+that element's contrast. The measurement is correct and the prompt instruction is
+present; a 9B model at this size treats the suffix as background rather than
+something to report. Worth knowing before anyone describes this as a fix.
+
+The first implementation of this check was also wrong, in a way only a real browser
+could show. It reported `caveat: overlap` on all three probe elements, because the
+freeze shield covers the page by design and `document.elementsFromPoint` reports
+its shadow **host** — so the tool was reading its own chrome as the page
+overlapping itself. `hitTestPage` had already solved this for click targeting by
+briefly dropping the shield's `pointer-events`; the caveat check now does the same
+and filters the host, and restores what it borrowed.
 
 ## Source pointers: why not the target's dev server
 

@@ -233,6 +233,46 @@ And the derived tokens are verdicts, not topics. A `contrast`, `text-truncated`
 or `font-load` token is a result the browser already reached: quote it, never
 recompute the ratio, and never replace `unmeasurable` with a number of your own.
 
+A contrast token may also carry a suffix — `(shadow behind)` or `(overlap above)`.
+It is not decoration. The ratio comes from walking the ancestor chain for a
+background colour, and a `box-shadow` behind the text and a sibling painted over it
+both sit outside that walk, so the number is right about a backdrop that is not
+quite what is under the glyphs. The number is kept because it is still the best
+flat estimate, and the caveat rides in the same prompt token so the verdict and its
+limits cannot be separated on the way to the model. Measured: a 9B writes the
+caveat in its reasoning and then leaves it out of the answer, so the suffix is
+correct infrastructure and not yet a guarantee.
+
+## 6a. Generation controls (§16.12)
+
+`src/ollama/params.ts` owns every number sent as `options`, and the settings
+drawer exposes them. The app sends all of them on every request, so there is no
+path where a server default decides anything — a default is a number nobody in
+this project chose.
+
+| Setting | Default | Why |
+| --- | --- | --- |
+| `num_ctx` | 8192 | Ollama defaults to 4096. One image turn measures 4245 prompt tokens, 5235 with a prior exchange. |
+| `think` | `low` | Bounds the trace. A level is dropped rather than sent for a model with no `thinking` capability, which Ollama rejects. |
+| `temperature` | 0 | Greedy decoding. With it, a fixed prompt returned byte-identical text and thinking 5/5; without it, 5/5 distinct. |
+| `seed` | 42 | Inert at temperature 0 — the RNG is never drawn. Kept for when it is not 0. |
+| `repeat_penalty` | 1.15 | Insurance, not a proven fix. See the verification report. |
+| `repeat_last_n` | 128 | The window that penalty looks over. |
+| `num_predict` | 4096 | A cap on damage. It covers the thinking trace too. |
+
+Two facts about the budget are load-bearing:
+
+- The effective ceiling is `min(num_predict, num_ctx − prompt_eval)`, so
+  `num_predict` can over-commit against the window on a first image turn.
+- `MAX_HISTORY_MESSAGES` is a message count, not a token budget, and 40 messages is
+  no budget at all when a turn carries screenshots. History is now trimmed against
+  a token estimate before the request, keeping the newest turns.
+
+A short answer that stopped at a cap is reported with **which** cap, because the
+two have different fixes, and a short answer that finished on its own is shown.
+The same treatment covers a reasoning budget spent entirely on `thinking`: both
+end the stream cleanly and both used to reach the user as a stub.
+
 ## 6b. Structured CSS preview (auto, runtime only)
 
 - The English system role asks the model to append exactly one fenced block
@@ -266,6 +306,37 @@ flash for a frame or two before the newline completes the line, because the
 streaming guard only hides prefixes of the correct tag. Hiding every unrecognised
 fence would mean hiding the user's own code blocks, and the payload leaking is the
 part that has to be prevented.
+
+### The request decides whether a block may exist, not the prompt
+
+The prompt tells the model that `바꾸지 마` means no block, and a handoff request
+means no block. Twice, in two wordings. A 9B emitted a block on a handoff request
+anyway in roughly one run in three. A prompt instruction is a suggestion sampled
+at temperature; `src/ollama/intent.ts` is a check.
+
+`previewIntent(rawRequest)` runs on the user's own words, **before any model
+output exists**, and the sidecar is constructed with `suppressBlock`. A suppressed
+block is still removed from the text — a machine fence the user cannot act on is
+worse than no fence, and the JSON must not print into the answer either way — but
+it is never offered. It is counted in `blocksSuppressed` rather than
+`blocksInvalid`, because nothing is wrong with the payload; the request was, and a
+stat report that conflated them would read like a model failure.
+
+The scope is deliberately one-directional: only rules that **suppress** a block
+exist. An explicit no-change instruction wins over everything; otherwise a change
+cue beats a handoff cue, and only a text-shaped request with no change cue in it is
+suppressed. There is no "you must have said one of these words" rule, because that
+would invent a false negative for `이거 좀 어색한데` and quietly stop helping. The
+asymmetry is the argument: a false positive costs the user a keystroke, a false
+negative restyles their product without asking.
+
+What this does not claim: the trigger is not the wording. Measured, the raw model
+emitted a block on 3 of 9 handoff phrasings **with images attached** and 0 of 10
+for the identical text without. The images flip the decision, which is why a
+text-only probe arm reported zero while the app kept hitting it. The gate closes it
+at the app layer (0 of 8), but the honest description of the bug is "a screenshot
+makes the model more willing to propose", not "the model ignores the handoff rule".
+
 - `usePreviewController` turns one clean assistant completion into a single
   atomic transaction. It resolves `selectorId` to a strong anchor, applies a
   bridge-owned `<style>` layer through `VERA_INSPECTOR_PREVIEW_APPLY`, and only
