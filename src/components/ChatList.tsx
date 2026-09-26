@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type RefObject } from 'react';
 import { AttachmentChips } from '../editor/AttachmentChip.tsx';
 import type { DesignDecision, PreviewRuntimeStatus } from '../preview/transaction.ts';
 import type { ProposalState } from '../preview/proposal.ts';
@@ -33,6 +33,10 @@ export interface ChatListProps {
   onUndoPreview?: (messageId: string) => void;
   /** Re-selects a component the answer cited, in the inspected page. */
   onCite?: (selectionId: string) => void;
+  /** Lets the parent drive the message scroll (jump buttons). */
+  scrollRef?: RefObject<HTMLDivElement | null>;
+  /** Fires when the message list scrolls, so the parent can show jump buttons. */
+  onListScroll?: () => void;
 }
 
 interface DecisionOption {
@@ -226,12 +230,79 @@ function PreviewState({
 }
 
 function MessageBody({ message, onCite }: { message: ChatMessage; onCite?: (selectionId: string) => void }) {
-  if (message.content === '' && message.status === 'streaming') return '…';
+  if (message.content === '' && message.status === 'streaming') {
+    return (
+      <span className="typing-row">
+        <TypingDots />
+        <span className="typing-label">답변 작성 중…</span>
+      </span>
+    );
+  }
   if (message.role === 'assistant') {
     return <MarkdownMessage content={message.content} citations={message.citations} onCite={onCite} />;
   }
   if (message.content === '') return null;
   return <UserText message={message} />;
+}
+
+/**
+ * Three dots that never sit still while the model is working. The previous UI
+ * showed a frozen `…` for a minute-long 9B turn, which reads as a hang; motion
+ * is the difference between "working" and "stuck".
+ */
+export function TypingDots() {
+  return (
+    <span className="typing-dots" aria-hidden="true">
+      <span />
+      <span />
+      <span />
+    </span>
+  );
+}
+
+/** A ring that keeps turning while the answer streams in. */
+export function Spinner() {
+  return <span className="spin" aria-hidden="true" />;
+}
+
+/**
+ * The reasoning log, Ollama-style: a collapsed preview of about four lines,
+ * one click to read the whole trace, another click to fold it back.
+ *
+ * It sits above the answer because that is the order it happened in — the
+ * model thought first, then wrote — and because a trace that renders below a
+ * finished answer looks like a second answer.
+ */
+function ThinkingBlock({ thinking, streaming }: { thinking: string; streaming: boolean }) {
+  const [open, setOpen] = useState(false);
+  const chars = thinking.length;
+  return (
+    <div className={`thinking${open ? ' open' : ''}`}>
+      <button
+        type="button"
+        className="thinking-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        title={open ? '추론 로그 접기 (4줄만 보기)' : '추론 로그 전체 보기'}
+      >
+        <span className="thinking-caret" aria-hidden="true">
+          {open ? '▾' : '▸'}
+        </span>
+        {streaming ? (
+          <span className="thinking-live">
+            <Spinner />
+            <span>생각 중…</span>
+          </span>
+        ) : (
+          <span>생각 과정</span>
+        )}
+        <span className="thinking-meta">{chars.toLocaleString()}자</span>
+      </button>
+      <div className="thinking-body" role="log" aria-label="모델 추론 로그">
+        {thinking}
+      </div>
+    </div>
+  );
 }
 
 export function ChatList({
@@ -243,12 +314,14 @@ export function ChatList({
   onDecision,
   onUndoPreview,
   onCite,
+  scrollRef,
+  onListScroll,
 }: ChatListProps) {
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   if (messages.length === 0) {
     return (
-      <div className="messages">
+      <div className="messages" ref={scrollRef} onScroll={onListScroll}>
         <div className="empty-chat" role="status">
           <div className="empty-mark" aria-hidden="true">✦</div>
           <h3>Inspect, ask, refine</h3>
@@ -262,14 +335,22 @@ export function ChatList({
   }
 
   return (
-    <div className="messages" aria-live="polite">
+    <div className="messages" aria-live="polite" ref={scrollRef} onScroll={onListScroll}>
       {messages.map((m) => {
         const preview = previewFor(previews, m.id);
         const decided = preview?.proposalState === 'accepted' || preview?.proposalState === 'rejected';
+        const thinking = m.role === 'assistant' && m.thinking ? m.thinking : null;
+        const isLive = m.status === 'streaming' && streaming;
         return (
           <div className={`msg ${m.role}`} key={m.id}>
+            {thinking !== null && (
+              <ThinkingBlock thinking={thinking} streaming={isLive} />
+            )}
             <div className="bubble">
               <MessageBody message={m} onCite={onCite} />
+              {isLive && m.content !== '' && (
+                <span className="typing-caret" aria-hidden="true" />
+              )}
               <MessageAttachments message={m} />
             </div>
             {m.role === 'assistant' && preview && (
@@ -281,7 +362,17 @@ export function ChatList({
             )}
             {m.role === 'assistant' && m.status !== undefined && m.status !== 'completed' && (
               <span className={`status-note ${m.status === 'error' ? 'err' : ''}`} role="status">
-                {m.status === 'streaming' ? (streaming ? 'Streaming…' : 'Starting…') : m.status === 'interrupted' ? 'Stopped — request preserved.' : 'Error — request preserved.'}
+                {m.status === 'streaming'
+                  ? streaming
+                    ? (
+                      <span className="status-live">
+                        <Spinner />
+                        <span>답변 작성 중</span>
+                        <TypingDots />
+                      </span>
+                    )
+                    : 'Starting…'
+                  : m.status === 'interrupted' ? 'Stopped — request preserved.' : 'Error — request preserved.'}
               </span>
             )}
             <div className="actions">

@@ -11,6 +11,7 @@ import {
   STORAGE_KEY,
 } from './store.ts';
 import { DEFAULT_GENERATION } from './store.ts';
+import { MAX_THINKING_CHARS } from '../state/models.ts';
 import type { PreviewAnchor, PreviewTransaction } from '../preview/transaction.ts';
 
 afterEach(() => {
@@ -227,6 +228,62 @@ describe('persistence', () => {
     expect(messages[0]?.decision).toBe('accepted');
     expect(messages[0]?.previewTransactionId).toBe('tx-1');
     expect(messages[1]?.decision).toBeUndefined();
+  });
+
+  it('preserves the reasoning log and caps a hand-edited giant', () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      envelopeV2({
+        sessions: [
+          {
+            id: 's1',
+            title: 'T',
+            targetUrl: '',
+            model: '',
+            messages: [
+              {
+                id: 'm1',
+                role: 'assistant',
+                content: 'done',
+                citations: [],
+                status: 'completed',
+                createdAt: 1,
+                thinking: 'First the padding, then the radius.',
+              },
+              {
+                id: 'm2',
+                role: 'assistant',
+                content: 'done',
+                citations: [],
+                status: 'completed',
+                createdAt: 2,
+                thinking: `x${'y'.repeat(100_000)}`,
+              },
+              {
+                id: 'm3',
+                role: 'assistant',
+                content: 'done',
+                citations: [],
+                status: 'completed',
+                createdAt: 3,
+                thinking: 42,
+              },
+            ],
+            persistedActiveSelectionIds: [],
+            createdAt: 0,
+            updatedAt: 0,
+          },
+        ],
+        currentSessionId: 's1',
+      }),
+    );
+    const messages = loadPersisted().shape.sessions[0]?.messages ?? [];
+    expect(messages[0]?.thinking).toBe('First the padding, then the radius.');
+    // A stored log past the cap is trimmed, not dropped — the trace survives.
+    expect(messages[1]?.thinking?.length).toBe(MAX_THINKING_CHARS);
+    expect(messages[1]?.thinking?.startsWith('xy')).toBe(true);
+    // A non-string is not a log.
+    expect(messages[2]?.thinking).toBeUndefined();
   });
 
   it('recovers deterministically from malformed stored state', () => {

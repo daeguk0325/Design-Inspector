@@ -15,7 +15,8 @@ import { useBridge } from './hooks/useBridge.ts';
 import { useSessions } from './hooks/useSessions.ts';
 import { useChat } from './hooks/useChat.ts';
 import { reconcileActiveSelections } from './state/reconcile.ts';
-import type { ChatMessage } from './state/models.ts';
+import type { ChatMessage, MessagePatch } from './state/models.ts';
+import { capThinking } from './state/models.ts';
 import type { PreviewTransaction } from './preview/transaction.ts';
 import { parseInspectorTokenFromSearch, parseTargetFromSearch, stripTargetParam } from './target/fromQuery.ts';
 import { createTargetProxyRoute, validateTargetProxyInput } from './supervisor/client.ts';
@@ -38,6 +39,10 @@ import {
 import { usePreviewController } from './preview/controller.ts';
 import { changeLogForSession } from './preview/proposal.ts';
 import { ProposalPanel } from './components/ProposalPanel.tsx';
+import { cancelChatScroll, chatEdges, smoothChatScroll } from './components/chatScroll.ts';
+
+/** A jump button hides within this many pixels of its edge. */
+const CHAT_EDGE_HIDE_PX = 48;
 
 const VIEWPORT_WIDTHS: Record<ViewportPreset, number> = {
   desktop: 1280,
@@ -95,6 +100,42 @@ export default function App() {
   const workRef = useRef<HTMLDivElement | null>(null);
   const targetPaneRef = useRef<HTMLElement | null>(null);
   const chatPaneRef = useRef<HTMLElement | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const [chatJump, setChatJump] = useState({ showTop: false, showBottom: false });
+
+  /**
+   * Jump buttons appear only where there is somewhere to go: the top button
+   * once the first message has scrolled away, the bottom one once the latest
+   * answer is out of view. Near an edge both hide, because a button that
+   * scrolls nowhere is decoration.
+   */
+  const updateChatJump = useCallback(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const edges = chatEdges(el);
+    setChatJump((prev) => {
+      const next = {
+        showTop: edges.top > CHAT_EDGE_HIDE_PX,
+        showBottom: edges.bottom > CHAT_EDGE_HIDE_PX,
+      };
+      return prev.showTop === next.showTop && prev.showBottom === next.showBottom ? prev : next;
+    });
+  }, []);
+
+  // Content grows under the list while streaming; the edges move with it.
+  useEffect(() => {
+    updateChatJump();
+  });
+
+  function jumpChatToTop() {
+    const el = chatScrollRef.current;
+    if (el) smoothChatScroll(el, 0);
+  }
+
+  function jumpChatToBottom() {
+    const el = chatScrollRef.current;
+    if (el) smoothChatScroll(el, el.scrollHeight);
+  }
   const currentSessionIdRef = useRef<string | null>(current?.id ?? null);
   currentSessionIdRef.current = current?.id ?? null;
   const preview = usePreviewController({
@@ -324,7 +365,7 @@ export default function App() {
   );
 
   const patchMessage = useCallback(
-    (sessionId: string, id: string, patch: Partial<ChatMessage> & { appendContent?: string }) => {
+    (sessionId: string, id: string, patch: MessagePatch) => {
       sessions.updateSession(sessionId, (s) => ({
         ...s,
         messages: s.messages.map((m) =>
@@ -334,6 +375,10 @@ export default function App() {
                 ...('content' in patch ? { content: patch.content ?? m.content } : {}),
                 ...(patch.appendContent !== undefined && patch.appendContent !== ''
                   ? { content: m.content + patch.appendContent }
+                  : {}),
+                ...('thinking' in patch ? { thinking: patch.thinking } : {}),
+                ...(patch.appendThinking !== undefined && patch.appendThinking !== ''
+                  ? { thinking: capThinking((m.thinking ?? '') + patch.appendThinking) }
                   : {}),
                 ...(patch.status ? { status: patch.status } : {}),
                 ...(patch.citations ? { citations: patch.citations } : {}),
@@ -615,15 +660,24 @@ export default function App() {
               </div>
             </div>
           ) : current ? (
-            <ChatList
-              messages={current.messages}
-              streaming={chat.streaming}
-              previews={preview.previews}
-              onDecision={preview.decide}
-              onUndoPreview={(messageId) => void preview.undo(messageId)}
-              onCopy={(t) => void copyText(t, () => undefined)}
-              onCite={bridge.reselectSelection}
-              onRevert={(userMsg) => {
+            <div
+              className="chat-scroll"
+              onWheelCapture={() => {
+                const el = chatScrollRef.current;
+                if (el) cancelChatScroll(el);
+              }}
+            >
+              <ChatList
+                messages={current.messages}
+                streaming={chat.streaming}
+                previews={preview.previews}
+                onDecision={preview.decide}
+                onUndoPreview={(messageId) => void preview.undo(messageId)}
+                onCopy={(t) => void copyText(t, () => undefined)}
+                onCite={bridge.reselectSelection}
+                scrollRef={chatScrollRef}
+                onListScroll={updateChatJump}
+                onRevert={(userMsg) => {
                 const text = userMsg.content;
                 if (!current) return;
                 void (async () => {
@@ -638,7 +692,32 @@ export default function App() {
                   setComposerSeed({ text, nonce: Date.now() });
                 })();
               }}
-            />
+              />
+              <button
+                type="button"
+                className="chat-jump-btn jump-top"
+                data-hidden={chatJump.showTop ? 'false' : 'true'}
+                tabIndex={chatJump.showTop ? 0 : -1}
+                aria-label="채팅 맨 위로"
+                title="맨 위로"
+                onClick={jumpChatToTop}
+              >
+                <span className="arrow" aria-hidden="true">▲</span>
+                <span>맨 위</span>
+              </button>
+              <button
+                type="button"
+                className="chat-jump-btn jump-bottom"
+                data-hidden={chatJump.showBottom ? 'false' : 'true'}
+                tabIndex={chatJump.showBottom ? 0 : -1}
+                aria-label="채팅 맨 아래로"
+                title="맨 아래로"
+                onClick={jumpChatToBottom}
+              >
+                <span className="arrow" aria-hidden="true">▼</span>
+                <span>맨 아래</span>
+              </button>
+            </div>
           ) : null}
 
           {detailsRecord && (

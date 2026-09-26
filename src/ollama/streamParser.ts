@@ -3,11 +3,12 @@
 // partial objects, UTF-8 splits (caller decodes with TextDecoder streaming),
 // malformed chunks (skipped, surfaced via onErrorChunk), and done signals.
 //
-// The thinking channel is counted but never emitted. Ollama streams it as
+// The thinking channel is emitted separately from content. Ollama streams it as
 // `message.thinking`, separate from `message.content`, and a reasoning model
 // that spends its whole budget there returns a 0-byte `content`. Ignoring the
 // field is why that looked like a silent failure; remembering that it happened
-// is what lets the caller explain it.
+// is what lets the caller explain it, and forwarding the text is what lets the
+// UI show the reasoning log instead of only counting it.
 
 export interface ChatChunk {
   message?: { content?: string; thinking?: string };
@@ -62,9 +63,14 @@ export class OllamaStreamParser {
     };
   }
 
-  private consume(obj: ChatChunk, onContent: (content: string) => void): void {
+  private consume(
+    obj: ChatChunk,
+    onContent: (content: string) => void,
+    onThinking?: (thinking: string) => void,
+  ): void {
     if (typeof obj.message?.thinking === 'string' && obj.message.thinking) {
       this.thinkingChars += obj.message.thinking.length;
+      onThinking?.(obj.message.thinking);
     }
     if (typeof obj.message?.content === 'string' && obj.message.content) {
       onContent(obj.message.content);
@@ -82,6 +88,7 @@ export class OllamaStreamParser {
     onContent: (content: string) => void,
     onDone?: () => void,
     onServerError?: (msg: string) => void,
+    onThinking?: (thinking: string) => void,
   ): void {
     this.buffer += text;
     // Split on newlines; keep trailing partial line in buffer.
@@ -101,7 +108,7 @@ export class OllamaStreamParser {
         onServerError?.(obj.error);
         continue;
       }
-      this.consume(obj, onContent);
+      this.consume(obj, onContent, onThinking);
       if (obj.done === true) {
         onDone?.();
       }
@@ -112,13 +119,14 @@ export class OllamaStreamParser {
   flush(
     onContent: (content: string) => void,
     onDone?: () => void,
+    onThinking?: (thinking: string) => void,
   ): void {
     const trimmed = this.buffer.trim();
     this.buffer = '';
     if (!trimmed) return;
     try {
       const obj = JSON.parse(trimmed) as ChatChunk;
-      this.consume(obj, onContent);
+      this.consume(obj, onContent, onThinking);
       if (obj.done === true) onDone?.();
     } catch {
       this.malformedChunks += 1;

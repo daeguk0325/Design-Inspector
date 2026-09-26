@@ -413,3 +413,101 @@ describe('ChatList preview state', () => {
     expect(container.querySelectorAll('.preview-row')).toHaveLength(0);
   });
 });
+
+describe('ChatList thinking log', () => {
+  function renderThinking(overrides: Partial<ChatMessage> = {}, streaming = false): HTMLElement {
+    return mount(
+      <ChatList
+        messages={[message({
+          id: 'a1',
+          role: 'assistant',
+          content: 'Done',
+          status: 'completed',
+          thinking: 'First I considered the padding.\nThen the radius.\nThen the color.\nThen the font.\nThen the gap.\nThen done.',
+          ...overrides,
+        })]}
+        streaming={streaming}
+        onCopy={vi.fn()}
+        onRevert={vi.fn()}
+      />,
+    );
+  }
+
+  it('shows the reasoning log above the answer, collapsed to a preview', () => {
+    const container = renderThinking();
+    const block = container.querySelector('.msg.assistant .thinking');
+    expect(block).not.toBeNull();
+    expect(block?.classList.contains('open')).toBe(false);
+    // The toggle sits before the bubble in the message, because the model
+    // thought first and wrote second.
+    const msg = container.querySelector('.msg.assistant');
+    expect(msg?.firstElementChild?.classList.contains('thinking')).toBe(true);
+    const toggle = container.querySelector<HTMLButtonElement>('.thinking-toggle');
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('.thinking-body')?.textContent).toContain('First I considered');
+  });
+
+  it('opens the full trace on click and folds back to four lines on the next', () => {
+    const container = renderThinking();
+    const toggle = container.querySelector<HTMLButtonElement>('.thinking-toggle');
+    click(toggle);
+    expect(container.querySelector('.thinking')?.classList.contains('open')).toBe(true);
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    click(toggle);
+    expect(container.querySelector('.thinking')?.classList.contains('open')).toBe(false);
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('shows a live spinner in the toggle while the answer streams', () => {
+    const container = renderThinking({ status: 'streaming', content: '' }, true);
+    expect(container.querySelector('.thinking .spin')).not.toBeNull();
+    expect(container.querySelector('.thinking-toggle')?.textContent).toContain('생각 중');
+  });
+
+  it('renders nothing when the model did not think', () => {
+    const container = renderThinking({ thinking: undefined });
+    expect(container.querySelector('.thinking')).toBeNull();
+  });
+});
+
+describe('ChatList streaming motion', () => {
+  it('animates dots instead of a frozen ellipsis before the first token', () => {
+    const container = mount(
+      <ChatList
+        messages={[message({ id: 'a1', role: 'assistant', content: '', status: 'streaming' })]}
+        streaming
+        onCopy={vi.fn()}
+        onRevert={vi.fn()}
+      />,
+    );
+    expect(container.querySelector('.typing-dots')).not.toBeNull();
+    expect(container.querySelector('.typing-label')?.textContent).toContain('답변 작성 중');
+    expect(container.querySelector('.status-note .spin')).not.toBeNull();
+  });
+
+  it('keeps a blinking caret at the end of a partial answer', () => {
+    const container = mount(
+      <ChatList
+        messages={[message({ id: 'a1', role: 'assistant', content: 'half an', status: 'streaming' })]}
+        streaming
+        onCopy={vi.fn()}
+        onRevert={vi.fn()}
+      />,
+    );
+    expect(container.querySelector('.bubble .typing-caret')).not.toBeNull();
+  });
+
+  it('shows no motion once the answer is done', () => {
+    const container = mount(
+      <ChatList
+        messages={[message({ id: 'a1', role: 'assistant', content: 'Done', status: 'completed' })]}
+        streaming={false}
+        onCopy={vi.fn()}
+        onRevert={vi.fn()}
+      />,
+    );
+    expect(container.querySelector('.typing-dots')).toBeNull();
+    expect(container.querySelector('.typing-caret')).toBeNull();
+    expect(container.querySelector('.spin')).toBeNull();
+  });
+});

@@ -253,6 +253,8 @@ export interface ChatCallbacks {
   onToken: (t: string) => void;
   onDone: (meta: ChatDoneMeta) => void;
   onError: (msg: string) => void;
+  /** Reasoning text, streamed apart from the answer. Absent on non-thinking models. */
+  onThinking?: (t: string) => void;
 }
 
 /**
@@ -546,10 +548,11 @@ export async function streamChat(
           done = true;
         },
         (msg) => cb.onError(`Ollama error: ${msg}`),
+        (thinking) => cb.onThinking?.(thinking),
       );
       if (done) break;
     }
-    parser.flush(emit);
+    parser.flush(emit, undefined, (thinking) => cb.onThinking?.(thinking));
     const budget = parser.budget();
     // A reasoning budget that gets spent on thinking leaves nothing to show.
     // The stream ends cleanly, so without this the user watches a spinner

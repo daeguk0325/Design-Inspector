@@ -9,6 +9,7 @@ import type {
   PersistedShape,
 } from '../state/models.ts';
 import { isDesignDecision, sanitizePreviewTransactions } from '../preview/transaction.ts';
+import { capThinking } from '../state/models.ts';
 import { normalizeGenerationSettings, DEFAULT_GENERATION_SETTINGS } from '../ollama/params.ts';
 import type { GenerationSettings } from '../ollama/params.ts';
 
@@ -80,6 +81,8 @@ function normalizeMessage(raw: unknown): ChatMessage | null {
   };
   if (role === 'assistant') message.status = normalizeStatus(raw['status']);
   if (isDesignDecision(raw['decision'])) message.decision = raw['decision'];
+  const thinking = raw['thinking'];
+  if (typeof thinking === 'string' && thinking !== '') message.thinking = capThinking(thinking);
   const previewTransactionId = raw['previewTransactionId'];
   if (typeof previewTransactionId === 'string') message.previewTransactionId = previewTransactionId;
   return message;

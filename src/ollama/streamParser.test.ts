@@ -66,4 +66,34 @@ describe('OllamaStreamParser', () => {
     expect(doneCount).toBe(1);
     expect(errors).toEqual(['boom']);
   });
+
+  it('emits thinking apart from content instead of only counting it', () => {
+    const parser = new OllamaStreamParser();
+    const tokens: string[] = [];
+    const thoughts: string[] = [];
+    parser.push(
+      JSON.stringify({ message: { thinking: 'first hunch', content: 'Hi' } }) + '\n',
+      (t) => tokens.push(t),
+      undefined,
+      undefined,
+      (t) => thoughts.push(t),
+    );
+    parser.flush(
+      (t) => tokens.push(t),
+      undefined,
+      (t) => thoughts.push(t),
+    );
+    expect(tokens.join('')).toBe('Hi');
+    expect(thoughts.join('')).toBe('first hunch');
+    expect(parser.sawThinking()).toBe(true);
+    expect(parser.thinkingLength()).toBe('first hunch'.length);
+  });
+
+  it('counts thinking even when nobody listens', () => {
+    // The 0-byte explanation depends on the count, not the subscription.
+    const { parser } = collect([
+      JSON.stringify({ message: { thinking: 'hmm' } }) + '\n',
+    ]);
+    expect(parser.sawThinking()).toBe(true);
+  });
 });

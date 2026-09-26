@@ -456,6 +456,116 @@ button, input, textarea, select { font: inherit; color: inherit; }
 
 .status-note { font-size: 12px; color: var(--text-3); }
 .status-note.err { color: var(--bad); }
+.status-live { display: inline-flex; align-items: center; gap: 6px; }
+
+/* ---- reasoning log: a 4-line preview until one click opens the trace ---- */
+.thinking {
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.thinking-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 7px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.thinking-toggle:hover { color: var(--text); background: var(--surface-soft); }
+.thinking-caret { font-size: 10px; color: var(--text-3); width: 12px; text-align: center; }
+.thinking-live { display: inline-flex; align-items: center; gap: 6px; }
+.thinking-meta { margin-left: auto; font-size: 11px; font-weight: 500; color: var(--text-3); }
+.thinking-body {
+  margin: 0;
+  padding: 0 11px 9px 30px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.thinking.open .thinking-body {
+  display: block;
+  max-height: min(40vh, 360px);
+  overflow-y: auto;
+  padding-bottom: 11px;
+}
+
+/* ---- streaming motion: dots that bounce, a ring that turns, a caret that blinks ---- */
+.typing-row { display: inline-flex; align-items: center; gap: 8px; }
+.typing-label { font-size: 13px; color: var(--text-2); }
+.typing-dots { display: inline-flex; align-items: center; gap: 3px; }
+.typing-dots span {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-3);
+  animation: typing-bounce 1.2s infinite ease-in-out;
+}
+.typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+.spin {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: spin-turn 0.9s linear infinite;
+}
+@keyframes spin-turn { to { transform: rotate(360deg); } }
+.typing-caret {
+  display: inline-block;
+  width: 8px; height: 15px;
+  margin-left: 3px;
+  vertical-align: -2px;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: caret-blink 1s steps(2, start) infinite;
+}
+@keyframes caret-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .typing-dots span, .spin, .typing-caret { animation: none; }
+  .typing-dots span { opacity: 0.8; }
+}
+
+/* ---- chat jump buttons: top and bottom, fading in only when useful ---- */
+.chat-scroll { position: relative; flex: 1; min-height: 0; display: flex; }
+.chat-scroll .messages { flex: 1; }
+.chat-jump-btn {
+  position: absolute;
+  right: 10px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  border-radius: 999px;
+  padding: 5px 11px 5px 9px;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--text-2);
+  cursor: pointer;
+  opacity: 1;
+  transition: opacity 0.2s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.chat-jump-btn.jump-top { top: 10px; }
+.chat-jump-btn.jump-bottom { bottom: 10px; }
+.chat-jump-btn:hover { color: var(--text); border-color: var(--accent-border); }
+.chat-jump-btn[data-hidden='true'] { opacity: 0; pointer-events: none; }
+.chat-jump-btn .arrow { font-size: 10px; }
 
 /* ---- component details (record data only; no target DOM or styles) ---- */
 .cdetails {

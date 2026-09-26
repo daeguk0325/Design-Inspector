@@ -5,7 +5,7 @@ import { DESIGN_INSPECTOR_SYSTEM_PROMPT, MAX_RESPONSE_CHARS } from '../ollama/cl
 import type { PreviewTransaction } from '../preview/transaction.ts';
 import { MAX_PREVIEW_BLOCK_CHARS } from '../preview/contract.ts';
 import type { SelectionRecord } from '../protocol/types.ts';
-import type { ChatMessage } from '../state/models.ts';
+import type { ChatMessage, MessagePatch } from '../state/models.ts';
 import type { ChatApi, ChatCompletion, OnChatComplete } from './useChat.ts';
 import { useChat } from './useChat.ts';
 
@@ -107,14 +107,14 @@ function stubFetch(responder: (index: number) => Response): RecordedRequest[] {
 interface PatchCall {
   sessionId: string;
   id: string;
-  patch: Partial<ChatMessage> & { appendContent?: string };
+  patch: MessagePatch;
 }
 
 interface Store {
   messages: Map<string, ChatMessage[]>;
   patches: PatchCall[];
   appendMessage: (sessionId: string, message: ChatMessage) => void;
-  patchMessage: (sessionId: string, id: string, patch: Partial<ChatMessage> & { appendContent?: string }) => void;
+  patchMessage: (sessionId: string, id: string, patch: MessagePatch) => void;
 }
 
 function createStore(): Store {
@@ -129,7 +129,7 @@ function createStore(): Store {
   const patchMessage = (
     sessionId: string,
     id: string,
-    patch: Partial<ChatMessage> & { appendContent?: string },
+    patch: MessagePatch,
   ): void => {
     patches.push({ sessionId, id, patch });
     messages.set(
@@ -140,6 +140,8 @@ function createStore(): Store {
               ...message,
               ...(patch.content !== undefined ? { content: patch.content } : {}),
               ...(patch.appendContent ? { content: message.content + patch.appendContent } : {}),
+              ...(patch.thinking !== undefined ? { thinking: patch.thinking } : {}),
+              ...(patch.appendThinking ? { thinking: (message.thinking ?? '') + patch.appendThinking } : {}),
               ...(patch.status ? { status: patch.status } : {}),
               ...(patch.citations ? { citations: patch.citations } : {}),
             }
@@ -366,6 +368,23 @@ describe('useChat streaming with the preview sidecar', () => {
     // `({1})` in its prose has something to point at.
     expect(assistant.citations).toEqual(userMessage(store, 'session-a').citations);
     expect(assistant.citations[0]?.displayNumber).toBe(1);
+  });
+
+  it('accumulates the reasoning channel onto the answer for the log', async () => {
+    const store = createStore();
+    stubFetch(() =>
+      ndjson([
+        { message: { thinking: 'First the padding. ' } },
+        { message: { thinking: 'Then the radius. ', content: '본문 [1]\n' } },
+        { done: true },
+      ]),
+    );
+    const api = mountChat();
+    expect(await send(api, store, 'session-a', '시각 개선안')).toBe(true);
+    const assistant = lastAssistant(store, 'session-a');
+    expect(assistant.thinking).toBe('First the padding. Then the radius. ');
+    expect(assistant.content).toBe('본문 [1]\n');
+    expect(assistant.status).toBe('completed');
   });
 
   it('carries the settled decisions into the next request', async () => {

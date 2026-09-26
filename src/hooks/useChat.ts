@@ -4,8 +4,8 @@
 import { useCallback, useRef, useState } from 'react';
 import { streamChat } from '../ollama/client.ts';
 import { shouldSuppressBlock } from '../ollama/intent.ts';
-import type { ChatMessage, CitationSnapshot } from '../state/models.ts';
-import { citationFromRecord, makeId } from '../state/models.ts';
+import type { ChatMessage, CitationSnapshot, MessagePatch } from '../state/models.ts';
+import { capThinking, citationFromRecord, makeId } from '../state/models.ts';
 import type { SelectionRecord } from '../protocol/types.ts';
 import type { VisualTransmission } from '../ollama/visualContext.ts';
 import { PreviewSidecarParser } from '../preview/index.ts';
@@ -36,7 +36,7 @@ export interface ChatApi {
     displayNumbers: Map<string, number>,
     visual: VisualTransmission | undefined,
     appendMessage: (sessionId: string, m: ChatMessage) => void,
-    patchMessage: (sessionId: string, id: string, patch: Partial<ChatMessage> & { appendContent?: string }) => void,
+    patchMessage: (sessionId: string, id: string, patch: MessagePatch) => void,
     history: ChatMessage[],
     baseUrl: string,
     model: string,
@@ -69,7 +69,7 @@ export function useChat(): ChatApi {
       visual: VisualTransmission | undefined,
       baseUrl: string,
       model: string,
-      patchMessage: (sessionId: string, id: string, patch: Partial<ChatMessage> & { appendContent?: string }) => void,
+      patchMessage: (sessionId: string, id: string, patch: MessagePatch) => void,
       onComplete: OnChatComplete | undefined,
       transactions: readonly PreviewTransaction[],
       generation: GenerationSettings,
@@ -83,6 +83,7 @@ export function useChat(): ChatApi {
       let errored: string | null = null;
       let truncated = false;
       let visible = '';
+      let thinking = '';
       const sidecar = new PreviewSidecarParser(
         { knownCitationNumbers: citations.map((citation) => citation.displayNumber) },
         // Decided from the request, before any of the model's output exists.
@@ -97,9 +98,20 @@ export function useChat(): ChatApi {
         if (!isCurrentAttempt()) return;
         patchMessage(sessionId, assistantId, { appendContent: text });
       };
+      const applyThinking = (text: string): void => {
+        if (text === '') return;
+        thinking += text;
+        if (!isCurrentAttempt()) return;
+        // The full string rides along rather than an append: the store caps it,
+        // and a capped append would need the current value anyway.
+        patchMessage(sessionId, assistantId, { thinking: capThinking(thinking) });
+      };
       await streamChat(baseUrl, model, history, rawRequest, citations, visual, ctrl.signal, {
         onToken: (t) => {
           applyVisible(sidecar.push(t).text);
+        },
+        onThinking: (t) => {
+          applyThinking(t);
         },
         onDone: (meta) => {
           truncated = meta.truncated;
@@ -158,7 +170,7 @@ export function useChat(): ChatApi {
   type PatchFn = (
     sessionId: string,
     id: string,
-    patch: Partial<ChatMessage> & { appendContent?: string },
+    patch: MessagePatch,
   ) => void;
 
   const send = useCallback(
