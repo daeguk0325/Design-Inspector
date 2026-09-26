@@ -865,6 +865,48 @@ The gate's scope is deliberately one-directional. Only rules that *suppress* a
 block exist, because a "you must have said one of these words" rule would invent a
 false negative for a request like `이거 좀 어색한데` and quietly stop helping.
 
+A gap in the gate was then found in the real app, which is the argument for
+running it there rather than only in unit tests:
+`이 변경 사항을 디자이너에게 전달할 문구 만들어줘` restyled the page and offered
+Accept/Reject, because the rule matched `전달문` and the request said `전달할 문구`.
+The 전달 family is now covered in its common spellings. The change list gained
+only unambiguous style verbs, and `정리` and `변경` are deliberately **absent** from
+it: `전달문으로 정리해줘` and `이 변경 사항을` are both requests for text, and
+either one would open the front door for the case the gate exists for.
+
+### A split fence printed the payload into the answer
+
+Found by driving the real app against the real model, and it is the kind of bug a
+jsdom fixture cannot produce, because the shape only comes from a real sample. The
+model wrote the fence bare with the info string on the next line:
+
+````
+```
+design-inspector-preview
+{"version":1,"rules":[...]}
+```
+````
+
+No line of that matches the opening-fence pattern, so the parser treated the whole
+thing as prose, `blocksStripped` stayed 0, and the JSON rendered into the answer as
+a visible code block. The near-miss tolerance exists precisely to stop that
+outcome and it did not help: it was written for a *misspelled* tag on the fence
+line, and this was a correct tag on the wrong line. On a change request the same
+shape also silently lost the proposal.
+
+A bare fence is now held for one line. If the next line is the tag it opens a
+block; if not, both lines are released together, so an ordinary code fence still
+reaches the reader. Verified in the live UI: the recorded split bytes now produce a
+pending card on a change request and nothing at all on a handoff, and 14 ordinary
+fence blocks — bare fences, fences tagged on the following line, a bare fence as
+the final token of a stream, and unterminated fences — came through with their
+bytes unchanged and no lost line break.
+
+One residual, reported rather than fixed: when the model puts the language on the
+line *after* a bare fence, the bytes survive but the block loses its syntax
+highlighting, because that is what the markdown renderer does with what the model
+actually wrote. The parser is not altering the text.
+
 ### The contrast caveat reaches the prompt and not always the answer
 
 `checkout-shadowed` in the probe target carries a real `box-shadow`, and the ratio

@@ -49,10 +49,18 @@ const NO_CHANGE = [
  * Requests whose deliverable is text about the current state, not a change to
  * it. "안내문" is here because a handoff for other people is exactly the case
  * that produced a bogus block.
+ *
+ * The 전달 family is spelled several ways and the gate was caught missing one:
+ * `전달할 문구 만들어줘` passed straight through `전달문`. Worth stating why that
+ * is the dangerous direction — a text request that gets a live restyle is the
+ * whole failure being prevented — and why a broad match is still acceptable:
+ * these rules only ever suppress, and a change cue still wins.
  */
 const NON_CHANGE_SHAPE = [
   /전달문/,
+  /전달\s*(할|할\s*수\s*있는|용)?\s*(문구|메시지|텍스트|카피|내용|안내|참고)/,
   /안내문/,
+  /안내\s*문구/,
   /공지\s*문구/,
   /공통\s*문구/,
   /리뷰만/,
@@ -60,6 +68,7 @@ const NON_CHANGE_SHAPE = [
   /handoff/i,
   /hand\s*off/i,
   /디자이너\s*에게\s*보낼/,
+  /보낼\s*(문구|메시지|텍스트|카피)/,
   /설명만/,
   /정리만/,
   /요약만/,
@@ -69,7 +78,14 @@ const NON_CHANGE_SHAPE = [
   /공유해줘/,
 ];
 
-/** A real instruction to change something. Beats NON_CHANGE_SHAPE. */
+/**
+ * A real instruction to change something. Beats NON_CHANGE_SHAPE.
+ *
+ * Only unambiguous style-changing verbs belong here. `정리` does not: "전달문으로
+ * 정리해줘" is a request for text, and putting it here would let exactly the case
+ * this gate exists for through the front door. `변경` is absent for the same
+ * reason — "이 변경 사항을 전달할 문구 만들어줘" refers to changes already made.
+ */
 const CHANGE = [
   /바꿔줘/,
   /바꾸어줘/,
@@ -84,6 +100,14 @@ const CHANGE = [
   /조정해줘/,
   /조정\s*해/,
   /조정하자/,
+  /고쳐줘/,
+  /고쳐\s*주/,
+  /고쳐야/,
+  /고쳐\b/,
+  /수정해줘/,
+  /손봐줘/,
+  /손보게/,
+  /개선해줘/,
   /늘려줘/,
   /늘리고/,
   /줄여줘/,
@@ -105,6 +129,7 @@ const CHANGE = [
   /\bincrease\b/i,
   /\bdecrease\b/i,
   /\breduce\b/i,
+  /\bfix\s+(it|this|the)\b/i,
   /\bset\s+(it|the|this)\b/i,
   /\bmake\s+it\b/i,
 ];
