@@ -719,6 +719,13 @@ button, input, textarea, select { font: inherit; color: inherit; }
   width: 100%; padding: 8px 11px; border: 1px solid var(--border);
   border-radius: var(--radius-sm); background: #fff;
 }
+.field input[type='range'] { padding: 0; border: 0; background: transparent; accent-color: var(--accent); }
+.field input[type='number'] { font-variant-numeric: tabular-nums; }
+.drawer-subhead {
+  font-size: 12px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-3); border-top: 1px solid var(--border-soft); padding-top: 12px; margin-top: 4px;
+}
+.gen-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
 .sess { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 9px 11px; display: flex; gap: 8px; align-items: center; }
 .sess.active { border-color: var(--accent-border); background: var(--accent-soft); }
 .sess .t { font-weight: 600; font-size: 13px; }

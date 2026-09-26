@@ -720,6 +720,7 @@ export default function App() {
                   sessionModel,
                   preview.applyCompletion,
                   transactions,
+                  sessions.settings.generation,
                 );
               } catch (error) {
                 setChatError(error instanceof Error ? error.message : 'Visual context could not be prepared.');
@@ -746,9 +747,10 @@ export default function App() {
         model={current?.model ?? ''}
         globalModel={sessions.settings.globalModel}
         autoCssPreview={sessions.settings.autoCssPreview}
-        onSave={(url, sessModel, gm, autoPreview) => {
+        generation={sessions.settings.generation}
+        onSave={(url, sessModel, gm, autoPreview, generation) => {
           setOllamaBaseUrl(url);
-          sessions.setSettings({ ollamaBaseUrl: url, globalModel: gm, autoCssPreview: autoPreview });
+          sessions.setSettings({ ollamaBaseUrl: url, globalModel: gm, autoCssPreview: autoPreview, generation });
           if (current && sessModel !== current.model) {
             sessions.updateSession(current.id, (s) => ({ ...s, model: sessModel }));
           }

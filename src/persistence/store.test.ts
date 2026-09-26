@@ -10,6 +10,7 @@ import {
   SETTINGS_KEY,
   STORAGE_KEY,
 } from './store.ts';
+import { DEFAULT_GENERATION } from './store.ts';
 import type { PreviewAnchor, PreviewTransaction } from '../preview/transaction.ts';
 
 afterEach(() => {
@@ -492,22 +493,34 @@ describe('settings', () => {
       ollamaBaseUrl: 'http://localhost:11434',
       globalModel: '',
       autoCssPreview: true,
+      generation: DEFAULT_GENERATION,
     });
   });
 
   it('preserves autoCssPreview false across save and load', () => {
     expect(
-      saveSettings({ ollamaBaseUrl: 'http://localhost:11434', globalModel: 'm', autoCssPreview: false }),
+      saveSettings({
+        ollamaBaseUrl: 'http://localhost:11434',
+        globalModel: 'm',
+        autoCssPreview: false,
+        generation: DEFAULT_GENERATION,
+      }),
     ).toBe('ok');
     expect(loadSettings().autoCssPreview).toBe(false);
   });
 
   it('preserves autoCssPreview true across save and load', () => {
-    saveSettings({ ollamaBaseUrl: 'http://host:1234', globalModel: 'm', autoCssPreview: true });
+    saveSettings({
+      ollamaBaseUrl: 'http://host:1234',
+      globalModel: 'm',
+      autoCssPreview: true,
+      generation: DEFAULT_GENERATION,
+    });
     expect(loadSettings()).toEqual({
       ollamaBaseUrl: 'http://host:1234',
       globalModel: 'm',
       autoCssPreview: true,
+      generation: DEFAULT_GENERATION,
     });
   });
 
@@ -528,8 +541,51 @@ describe('settings', () => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('nope');
     });
-    expect(saveSettings({ ollamaBaseUrl: 'x', globalModel: '', autoCssPreview: false })).toBe(
-      'failed',
+    expect(
+      saveSettings({
+        ollamaBaseUrl: 'x',
+        globalModel: '',
+        autoCssPreview: false,
+        generation: DEFAULT_GENERATION,
+      }),
+    ).toBe('failed');
+  });
+
+  it('preserves non-default generation settings across save and load', () => {
+    const generation = { ...DEFAULT_GENERATION, numCtx: 65536, think: 'high' as const, temperature: 0.35 };
+    expect(
+      saveSettings({
+        ollamaBaseUrl: 'http://host:1234',
+        globalModel: 'm',
+        autoCssPreview: true,
+        generation,
+      }),
+    ).toBe('ok');
+    expect(loadSettings().generation).toEqual(generation);
+  });
+
+  it('fills generation defaults for a settings blob written by an older build', () => {
+    // No `generation` key at all, which is what every pre-existing install has.
+    localStorage.setItem(
+      SETTINGS_KEY,
+      JSON.stringify({ ollamaBaseUrl: 'x', globalModel: 'y', autoCssPreview: true }),
     );
+    expect(loadSettings().generation).toEqual(DEFAULT_GENERATION);
+  });
+
+  it('clamps a hand-edited generation value that is out of range', () => {
+    localStorage.setItem(
+      SETTINGS_KEY,
+      JSON.stringify({
+        ollamaBaseUrl: 'x',
+        globalModel: 'y',
+        autoCssPreview: true,
+        generation: { numCtx: 999_999, repeatPenalty: 'high', think: 'insane' },
+      }),
+    );
+    const loaded = loadSettings().generation;
+    expect(loaded.numCtx).toBe(65536);
+    expect(loaded.repeatPenalty).toBe(DEFAULT_GENERATION.repeatPenalty);
+    expect(loaded.think).toBe(DEFAULT_GENERATION.think);
   });
 });

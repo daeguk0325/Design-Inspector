@@ -13,6 +13,8 @@ export interface PreviewSidecarStats {
   blocksUnterminated: number;
   /** Opened through a misspelled info string. See NEAR_MISS_MAX_EDITS. */
   blocksNearMiss: number;
+  /** Stripped because the request itself ruled out a change. See intent.ts. */
+  blocksSuppressed: number;
 }
 
 const OPENING_FENCE_RE = new RegExp('^`{3}' + PREVIEW_BLOCK_LANGUAGE + '[ \\t]*$', 'i');
@@ -76,6 +78,15 @@ const stripCarriageReturn = (line: string): string => (line.endsWith('\r') ? lin
 
 const isWhitespaceOnly = (value: string): boolean => /^\s*$/.test(value);
 
+export interface PreviewSidecarOptions {
+  /**
+   * Drop the block instead of validating it, because the user's own request
+   * ruled out a change (`바꾸지 마`, a handoff, a review). See ollama/intent.ts
+   * for why this is decided from the request rather than the prompt.
+   */
+  suppressBlock?: boolean;
+}
+
 export class PreviewSidecarParser {
   private readonly context: PreviewValidationContext;
   private lineBuffer = '';
@@ -93,9 +104,15 @@ export class PreviewSidecarParser {
   private oversized = 0;
   private unterminated = 0;
   private nearMiss = 0;
+  private suppressed = 0;
+  private readonly suppress: boolean;
 
-  constructor(context: PreviewValidationContext = {}) {
+  constructor(context: PreviewValidationContext = {}, options: PreviewSidecarOptions = {}) {
     this.context = context;
+    // When the request rules out a change, the block is still removed from the
+    // text — a machine fence the user cannot act on is worse than no fence — but
+    // it is never offered. The JSON must not print into the answer either way.
+    this.suppress = options.suppressBlock === true;
   }
 
   get candidate(): PreviewCandidate | null {
@@ -113,6 +130,7 @@ export class PreviewSidecarParser {
       blocksOversized: this.oversized,
       blocksUnterminated: this.unterminated,
       blocksNearMiss: this.nearMiss,
+      blocksSuppressed: this.suppressed,
     };
   }
 
@@ -235,6 +253,13 @@ export class PreviewSidecarParser {
     this.stripped += 1;
     if (nearMiss) this.nearMiss += 1;
     if (oversized) return;
+    if (this.suppress) {
+      // Counted separately from `invalid`: nothing is wrong with the block, the
+      // request was. Conflating the two would make a stat report look like a
+      // model failure.
+      this.suppressed += 1;
+      return;
+    }
     if (isWhitespaceOnly(raw)) {
       this.invalid += 1;
       return;
@@ -245,6 +270,7 @@ export class PreviewSidecarParser {
 
 export function createPreviewSidecarParser(
   context: PreviewValidationContext = {},
+  options: PreviewSidecarOptions = {},
 ): PreviewSidecarParser {
-  return new PreviewSidecarParser(context);
+  return new PreviewSidecarParser(context, options);
 }

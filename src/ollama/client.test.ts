@@ -9,6 +9,7 @@ import {
   streamChat,
   validatePreviewBlock,
 } from './client.ts';
+import { DEFAULT_GENERATION_SETTINGS } from './params.ts';
 import type { ChatDoneMeta } from './client.ts';
 import type { ChatMessage, CitationSnapshot } from '../state/models.ts';
 import type { StyleFacts } from '../protocol/types.ts';
@@ -61,6 +62,89 @@ function promptPropertyList(): string[] {
     .split(', ')
     .map((property) => property.trim());
 }
+
+function readBody(mock: { mock: { calls: unknown[][] } }): Record<string, unknown> {
+  const init = mock.mock.calls[0]?.[1] as RequestInit | undefined;
+  return JSON.parse(String(init?.body)) as Record<string, unknown>;
+}
+
+describe('streamChat generation controls', () => {
+  it('sends an explicit options block instead of inheriting server defaults', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => streamingResponse());
+    vi.stubGlobal('fetch', fetchMock);
+    await streamChat('http://localhost:11434', 'm', [], 'q', [], undefined, new AbortController().signal, {
+      onToken: () => {},
+      onDone: () => {},
+      onError: () => {},
+    });
+    const body = readBody(fetchMock as unknown as { mock: { calls: unknown[][] } });
+    // Every value explicit: a server default is a number nobody in this repo chose.
+    expect(body.options).toEqual({
+      num_ctx: 8192,
+      temperature: 0,
+      repeat_penalty: 1.15,
+      repeat_last_n: 128,
+      num_predict: 4096,
+      seed: 42,
+    });
+    expect(body.think).toBe('low');
+    vi.unstubAllGlobals();
+  });
+
+  it('honours overridden settings', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => streamingResponse());
+    vi.stubGlobal('fetch', fetchMock);
+    await streamChat(
+      'http://localhost:11434',
+      'm',
+      [],
+      'q',
+      [],
+      undefined,
+      new AbortController().signal,
+      { onToken: () => {}, onDone: () => {}, onError: () => {} },
+      [],
+      { ...DEFAULT_GENERATION_SETTINGS, numCtx: 65536, think: 'off', temperature: 0.4 },
+    );
+    const body = readBody(fetchMock as unknown as { mock: { calls: unknown[][] } });
+    expect(body.think).toBe(false);
+    expect(body.options).toMatchObject({ num_ctx: 65536, temperature: 0.4 });
+    vi.unstubAllGlobals();
+  });
+
+  it('reports a thinking-only response as an error instead of an empty bubble', async () => {
+    // The real 0-byte failure: the reasoning budget was spent on thinking and
+    // nothing was left to read. The stream ends cleanly, so this is the only
+    // place the user could be told.
+    const encoder = new TextEncoder();
+    const thinkingOnly = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(`${JSON.stringify({ message: { thinking: 'a long trace' } })}\n`),
+          );
+          controller.enqueue(encoder.encode(`${JSON.stringify({ done: true })}\n`));
+          controller.close();
+        },
+      }),
+      { status: 200 },
+    );
+    vi.stubGlobal('fetch', vi.fn(async () => thinkingOnly));
+    const errors: string[] = [];
+    let done = false;
+    await streamChat('http://localhost:11434', 'm', [], 'q', [], undefined, new AbortController().signal, {
+      onToken: () => {},
+      onDone: () => {
+        done = true;
+      },
+      onError: (msg) => errors.push(msg),
+    });
+    expect(done).toBe(false);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('num_predict');
+    vi.unstubAllGlobals();
+  });
+});
 
 describe('streamChat visual request', () => {
   it('sends the system role before one visual user message', async () => {
@@ -661,15 +745,23 @@ describe('buildTransmissionPrompt', () => {
   });
 
   it('routes a narrow question to the attributes it names', () => {
-    expect(buildTransmissionPrompt('색상 대비를 높여줘', [])).toContain('This request is about: color.');
-    expect(buildTransmissionPrompt('간격을 정리해줘', [])).toContain('This request is about: box.');
-    expect(buildTransmissionPrompt('애니메이션을 부드럽게', [])).toContain('This request is about: motion.');
-    expect(buildTransmissionPrompt('이거 괜찮아?', [])).not.toContain('This request is about');
+    expect(buildTransmissionPrompt('색상 대비를 높여줘', [])).toContain('color');
+    expect(buildTransmissionPrompt('간격을 정리해줘', [])).toContain('box');
+    expect(buildTransmissionPrompt('애니메이션을 부드럽게', [])).toContain('motion');
+    expect(buildTransmissionPrompt('이거 괜찮아?', [])).not.toContain('Request attribute groups');
+  });
+
+  it('keeps the routing hint out of quotable-instruction form', () => {
+    // A 9B thinking model looped 26 times on the previous phrasing, which read
+    // like a sentence to restate rather than a fact to use.
+    const prompt = buildTransmissionPrompt('간격과 폰트', []);
+    expect(prompt).toContain('Request attribute groups (routing hint, not a format to reproduce)');
+    expect(prompt).not.toContain('Answer from the measured values for those attributes first');
   });
 
   it('deduplicates overlapping focus keywords', () => {
     const prompt = buildTransmissionPrompt('폰트 색상과 색상 대비', []);
-    expect(prompt).toContain('This request is about: color, typography.');
+    expect(prompt).toContain('color, typography');
   });
 
 it('no longer mentions the display shorthand, because the facts no longer use it', () => {

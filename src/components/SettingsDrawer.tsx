@@ -5,6 +5,9 @@ import {
   isManualSelection,
   resolveModelValue,
 } from '../ollama/modelSelect.ts';
+import { normalizeGenerationSettings } from '../ollama/params.ts';
+import type { GenerationSettings } from '../ollama/params.ts';
+import { GenerationPanel } from './GenerationPanel.tsx';
 
 interface Props {
   open: boolean;
@@ -13,13 +16,29 @@ interface Props {
   model: string;
   globalModel: string;
   autoCssPreview: boolean;
-  onSave: (baseUrl: string, sessionModel: string, globalModel: string, autoCssPreview: boolean) => void;
+  generation: GenerationSettings;
+  onSave: (
+    baseUrl: string,
+    sessionModel: string,
+    globalModel: string,
+    autoCssPreview: boolean,
+    generation: GenerationSettings,
+  ) => void;
 }
 
 type LoadState = 'loading' | 'ready' | 'empty' | 'error';
 type TestState = 'idle' | 'testing' | 'ok' | 'fail';
 
-export function SettingsDrawer({ open, onClose, baseUrl, model, globalModel, autoCssPreview, onSave }: Props) {
+export function SettingsDrawer({
+  open,
+  onClose,
+  baseUrl,
+  model,
+  globalModel,
+  autoCssPreview,
+  generation,
+  onSave,
+}: Props) {
   const [url, setUrl] = useState(baseUrl);
   const [sessionSel, setSessionSel] = useState('');
   const [globalSel, setGlobalSel] = useState('');
@@ -32,6 +51,7 @@ export function SettingsDrawer({ open, onClose, baseUrl, model, globalModel, aut
   const [testMsg, setTestMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [autoPreview, setAutoPreview] = useState(autoCssPreview);
+  const [gen, setGen] = useState<GenerationSettings>(generation);
   const touched = useRef({ session: false, global: false });
 
   async function runChatTest(base: string, candidate: string): Promise<boolean> {
@@ -108,6 +128,7 @@ export function SettingsDrawer({ open, onClose, baseUrl, model, globalModel, aut
     setManualSession('');
     setManualGlobal('');
     setAutoPreview(autoCssPreview);
+    setGen(normalizeGenerationSettings(generation));
     setModels([]);
     setTestMsg(null);
     touched.current = { session: false, global: false };
@@ -280,12 +301,25 @@ export function SettingsDrawer({ open, onClose, baseUrl, model, globalModel, aut
             <span>Automatically apply validated CSS previews</span>
           </label>
 
+          <GenerationPanel
+            baseUrl={url}
+            model={effSession || effGlobal}
+            value={gen}
+            onChange={setGen}
+          />
+
           <div>
             <button
               type="button"
               className="btn primary"
               onClick={() => {
-                onSave(normalizeBaseUrl(url) || 'http://localhost:11434', effSession, effGlobal, autoPreview);
+                onSave(
+                  normalizeBaseUrl(url) || 'http://localhost:11434',
+                  effSession,
+                  effGlobal,
+                  autoPreview,
+                  gen,
+                );
                 onClose();
               }}
             >

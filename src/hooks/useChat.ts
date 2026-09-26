@@ -3,6 +3,7 @@
 
 import { useCallback, useRef, useState } from 'react';
 import { streamChat } from '../ollama/client.ts';
+import { shouldSuppressBlock } from '../ollama/intent.ts';
 import type { ChatMessage, CitationSnapshot } from '../state/models.ts';
 import { citationFromRecord, makeId } from '../state/models.ts';
 import type { SelectionRecord } from '../protocol/types.ts';
@@ -10,6 +11,8 @@ import type { VisualTransmission } from '../ollama/visualContext.ts';
 import { PreviewSidecarParser } from '../preview/index.ts';
 import type { PreviewCandidate } from '../preview/index.ts';
 import type { PreviewTransaction } from '../preview/transaction.ts';
+import { DEFAULT_GENERATION_SETTINGS } from '../ollama/params.ts';
+import type { GenerationSettings } from '../ollama/params.ts';
 
 export interface ChatCompletion {
   sessionId: string;
@@ -39,6 +42,7 @@ export interface ChatApi {
     model: string,
     onComplete?: OnChatComplete,
     transactions?: readonly PreviewTransaction[],
+    generation?: GenerationSettings,
   ) => Promise<boolean>;
   stop: () => void;
 }
@@ -68,6 +72,7 @@ export function useChat(): ChatApi {
       patchMessage: (sessionId: string, id: string, patch: Partial<ChatMessage> & { appendContent?: string }) => void,
       onComplete: OnChatComplete | undefined,
       transactions: readonly PreviewTransaction[],
+      generation: GenerationSettings,
     ) => {
       const ctrl = new AbortController();
       abortRef.current = ctrl;
@@ -78,9 +83,11 @@ export function useChat(): ChatApi {
       let errored: string | null = null;
       let truncated = false;
       let visible = '';
-      const sidecar = new PreviewSidecarParser({
-        knownCitationNumbers: citations.map((citation) => citation.displayNumber),
-      });
+      const sidecar = new PreviewSidecarParser(
+        { knownCitationNumbers: citations.map((citation) => citation.displayNumber) },
+        // Decided from the request, before any of the model's output exists.
+        { suppressBlock: shouldSuppressBlock(rawRequest) },
+      );
       const isCurrentAttempt = (): boolean =>
         activeSessionRef.current === sessionId && activeAssistantRef.current === assistantId;
       const applyVisible = (text: string): void => {
@@ -101,7 +108,7 @@ export function useChat(): ChatApi {
         onError: (msg) => {
           errored = msg;
         },
-      }, transactions);
+      }, transactions, generation);
       const wasAborted = ctrl.signal.aborted;
       // Never silently mark interrupted streams successful (§16.7).
       if (isCurrentAttempt()) {
@@ -168,6 +175,7 @@ export function useChat(): ChatApi {
       model: string,
       onComplete: OnChatComplete | undefined,
       transactions: readonly PreviewTransaction[] = [],
+      generation: GenerationSettings = DEFAULT_GENERATION_SETTINGS,
     ) => {
       if (streaming || abortRef.current) return false; // duplicate-send guard (§16.8)
       const text = rawText;
@@ -205,6 +213,7 @@ export function useChat(): ChatApi {
         patchMessage,
         onComplete,
         transactions,
+        generation,
       );
       return true;
     },

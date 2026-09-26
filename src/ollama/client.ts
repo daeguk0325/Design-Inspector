@@ -12,6 +12,8 @@ import type { VisualTransmission } from './visualContext.ts';
 import { VISUAL_ONLY_CSS_PROPERTIES } from '../preview/cssPolicy.ts';
 import { decisionContextLines } from '../preview/proposal.ts';
 import type { PreviewTransaction } from '../preview/transaction.ts';
+import { buildChatControls, DEFAULT_GENERATION_SETTINGS } from './params.ts';
+import type { GenerationSettings } from './params.ts';
 
 export {
   PREVIEW_BLOCK_LANGUAGE,
@@ -163,16 +165,9 @@ export function clearVisionCache(): void {
   visionCache.clear();
 }
 
-export async function detectVisionCapability(
-  baseUrl: string,
-  model: string,
-  signal?: AbortSignal,
-): Promise<VisionCapability> {
-  const base = normalizeBaseUrl(baseUrl);
-  const key = `${base}\n${model}`;
-  const hit = visionCache.get(key);
-  if (hit && Date.now() - hit.at < VISION_TTL_MS) return hit.value;
-  const res = await fetch(`${base}/api/show`, {
+/** Capability as advertised by `/api/show`; `unknown` when the field is absent. */
+async function readCapabilities(baseUrl: string, model: string, signal?: AbortSignal): Promise<Set<string> | null> {
+  const res = await fetch(`${normalizeBaseUrl(baseUrl)}/api/show`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model }),
@@ -180,16 +175,47 @@ export async function detectVisionCapability(
   });
   if (!res.ok) throw new Error(`model details failed: HTTP ${res.status}`);
   const data = (await res.json()) as { capabilities?: unknown };
-  const capabilities = Array.isArray(data.capabilities)
-    ? data.capabilities.filter((value): value is string => typeof value === 'string')
-    : null;
-  const value: VisionCapability = capabilities === null
-    ? 'unknown'
-    : capabilities.some((capability) => capability.toLowerCase() === 'vision')
-      ? 'yes'
-      : 'no';
+  if (!Array.isArray(data.capabilities)) return null;
+  return new Set(
+    data.capabilities
+      .filter((value): value is string => typeof value === 'string')
+      .map((value) => value.toLowerCase()),
+  );
+}
+
+export async function detectVisionCapability(
+  baseUrl: string,
+  model: string,
+  signal?: AbortSignal,
+): Promise<VisionCapability> {
+  const key = `${baseUrl}\n${model}`;
+  const hit = visionCache.get(key);
+  if (hit && Date.now() - hit.at < VISION_TTL_MS) return hit.value;
+  const capabilities = await readCapabilities(baseUrl, model, signal);
+  const value: VisionCapability =
+    capabilities === null
+      ? 'unknown'
+      : capabilities.has('vision')
+        ? 'yes'
+        : 'no';
   visionCache.set(key, { at: Date.now(), value });
   return value;
+}
+
+/**
+ * Whether the model has a thinking channel. Needed because a truthy `think` is
+ * rejected outright for a model without one, and the settings drawer offers
+ * reasoning levels for every model.
+ */
+export async function detectThinkingCapability(
+  baseUrl: string,
+  model: string,
+  signal?: AbortSignal,
+): Promise<boolean | undefined> {
+  if (!model) return undefined;
+  const capabilities = await readCapabilities(baseUrl, model, signal);
+  if (capabilities === null) return undefined;
+  return capabilities.has('thinking');
 }
 
 /** Actual chat-capability test (§16.3): sends a minimal non-streaming chat. */
@@ -243,10 +269,13 @@ function focusHint(request: string): string | null {
   const groups = FOCUS_HINTS.filter((hint) => hint.pattern.test(request)).map((hint) => hint.group);
   const unique = [...new Set(groups)];
   if (unique.length === 0) return null;
-  return (
-    `This request is about: ${unique.join(', ')}. ` +
-    'Answer from the measured values for those attributes first; treat the rest as context only.'
-  );
+  // Wording matters more than it looks. The previous phrasing ("Answer from the
+  // measured values for those attributes first; treat the rest as context
+  // only.") reads like a quotable instruction, and a 9B thinking model looped
+  // on it: 26 consecutive repetitions of that clause and then a 0-byte answer.
+  // A bare fact about which groups matched gives the model the same routing
+  // without offering it a sentence to restate.
+  return `Request attribute groups (routing hint, not a format to reproduce): ${unique.join(', ')}`;
 }
 
 function factsBlock(citations: CitationSnapshot[]): string | null {
@@ -366,9 +395,11 @@ export async function streamChat(
   signal: AbortSignal,
   cb: ChatCallbacks,
   transactions: readonly PreviewTransaction[] = [],
+  generation: GenerationSettings = DEFAULT_GENERATION_SETTINGS,
 ): Promise<void> {
   const base = normalizeBaseUrl(baseUrl);
   const parser = new OllamaStreamParser();
+  const controls = buildChatControls(generation);
   let res: Response;
   try {
     res = await fetch(`${base}/api/chat`, {
@@ -376,6 +407,8 @@ export async function streamChat(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model,
+        think: controls.think,
+        options: controls.options,
         messages: [
           { role: 'system', content: buildSystemPrompt(history, transactions) },
           ...toOllamaHistory(history),
@@ -404,13 +437,13 @@ export async function streamChat(
   const decoder = new TextDecoder();
   let done = false;
   let truncated = false;
-  let accumulated = 0;
+  let visible = 0;
   const emit = (content: string): void => {
     if (truncated) return;
-    accumulated += content.length;
-    if (accumulated > MAX_RESPONSE_CHARS) {
+    visible += content.length;
+    if (visible > MAX_RESPONSE_CHARS) {
       // Truncate deterministically at the cap.
-      const allowed = content.slice(0, Math.max(0, MAX_RESPONSE_CHARS - (accumulated - content.length)));
+      const allowed = content.slice(0, Math.max(0, MAX_RESPONSE_CHARS - (visible - content.length)));
       if (allowed) cb.onToken(allowed);
       truncated = true;
       done = true;
@@ -439,6 +472,19 @@ export async function streamChat(
       if (done) break;
     }
     parser.flush(emit);
+    // A reasoning budget that gets spent on thinking leaves nothing to show.
+    // The stream ends cleanly, so without this the user watches a spinner
+    // resolve into an empty bubble and cannot tell a model failure from a UI
+    // failure. It was observed as a real 0-byte response.
+    if (visible === 0) {
+      const thinkingOnly = parser.sawThinking();
+      cb.onError(
+        thinkingOnly
+          ? 'Ollama가 추론에만 응답을 사용했습니다 (본문 0자). num_predict를 늘리거나 think를 낮춰보세요.'
+          : 'Ollama가 빈 응답을 반환했습니다.',
+      );
+      return;
+    }
     cb.onDone({ truncated });
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') return;

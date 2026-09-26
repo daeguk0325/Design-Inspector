@@ -9,6 +9,10 @@ import type {
   PersistedShape,
 } from '../state/models.ts';
 import { isDesignDecision, sanitizePreviewTransactions } from '../preview/transaction.ts';
+import { normalizeGenerationSettings, DEFAULT_GENERATION_SETTINGS } from '../ollama/params.ts';
+import type { GenerationSettings } from '../ollama/params.ts';
+
+export const DEFAULT_GENERATION = DEFAULT_GENERATION_SETTINGS;
 
 export const STORAGE_KEY = 'design-inspector/v1';
 export const SCHEMA_VERSION = 2;
@@ -182,6 +186,7 @@ export interface SettingsShape {
   ollamaBaseUrl: string;
   globalModel: string;
   autoCssPreview: boolean;
+  generation: GenerationSettings;
 }
 
 function normalizeSettings(p: Partial<SettingsShape> | null | undefined): SettingsShape {
@@ -192,6 +197,10 @@ function normalizeSettings(p: Partial<SettingsShape> | null | undefined): Settin
         : 'http://localhost:11434',
     globalModel: typeof p?.globalModel === 'string' ? p.globalModel : '',
     autoCssPreview: typeof p?.autoCssPreview === 'boolean' ? p.autoCssPreview : true,
+    // A settings blob written by an older build has no `generation` at all, and
+    // one edited by hand can hold anything. The clamp lives in the params module
+    // so the request path and the storage path agree on what is legal.
+    generation: normalizeGenerationSettings(p?.generation),
   };
 }
 

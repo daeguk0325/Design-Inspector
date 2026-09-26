@@ -2,16 +2,42 @@
 // Tolerates arbitrary network chunk boundaries, multiple JSON objects per chunk,
 // partial objects, UTF-8 splits (caller decodes with TextDecoder streaming),
 // malformed chunks (skipped, surfaced via onErrorChunk), and done signals.
+//
+// The thinking channel is counted but never emitted. Ollama streams it as
+// `message.thinking`, separate from `message.content`, and a reasoning model
+// that spends its whole budget there returns a 0-byte `content`. Ignoring the
+// field is why that looked like a silent failure; remembering that it happened
+// is what lets the caller explain it.
 
 export interface ChatChunk {
-  message?: { content?: string };
+  message?: { content?: string; thinking?: string };
   done?: boolean;
   error?: string;
 }
 
 export class OllamaStreamParser {
   private buffer = '';
+  private thinkingChars = 0;
   malformedChunks = 0;
+
+  /** Whether any reasoning content arrived, regardless of what was shown. */
+  sawThinking(): boolean {
+    return this.thinkingChars > 0;
+  }
+
+  /** Total reasoning characters received. Diagnostic only. */
+  thinkingLength(): number {
+    return this.thinkingChars;
+  }
+
+  private consume(obj: ChatChunk, onContent: (content: string) => void): void {
+    if (typeof obj.message?.thinking === 'string' && obj.message.thinking) {
+      this.thinkingChars += obj.message.thinking.length;
+    }
+    if (typeof obj.message?.content === 'string' && obj.message.content) {
+      onContent(obj.message.content);
+    }
+  }
 
   /** Feed a decoded text fragment. Returns newly completed content pieces. */
   push(
@@ -38,9 +64,7 @@ export class OllamaStreamParser {
         onServerError?.(obj.error);
         continue;
       }
-      if (typeof obj.message?.content === 'string' && obj.message.content) {
-        onContent(obj.message.content);
-      }
+      this.consume(obj, onContent);
       if (obj.done === true) {
         onDone?.();
       }
@@ -57,9 +81,7 @@ export class OllamaStreamParser {
     if (!trimmed) return;
     try {
       const obj = JSON.parse(trimmed) as ChatChunk;
-      if (typeof obj.message?.content === 'string' && obj.message.content) {
-        onContent(obj.message.content);
-      }
+      this.consume(obj, onContent);
       if (obj.done === true) onDone?.();
     } catch {
       this.malformedChunks += 1;
