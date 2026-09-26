@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   DEFAULT_GENERATION_SETTINGS,
   GENERATION_LIMITS,
@@ -98,12 +98,15 @@ function NumberField({
  */
 export function GenerationPanel({ baseUrl, model, value, onChange }: Props) {
   const [supportsThinking, setSupportsThinking] = useState<boolean | undefined>(undefined);
-  const [probed, setProbed] = useState<string | null>(null);
+  // A ref rather than state: this is a "have I already asked" marker, so writing
+  // it must not schedule a render. A state write here would also re-run the
+  // effect it lives in.
+  const probed = useRef<string | null>(null);
 
   useEffect(() => {
     const key = `${baseUrl}\n${model}`;
-    if (!model || probed === key) return;
-    setProbed(key);
+    if (!model || probed.current === key) return;
+    probed.current = key;
     let cancelled = false;
     void detectThinkingCapability(baseUrl, model)
       .then((result) => {
@@ -117,7 +120,7 @@ export function GenerationPanel({ baseUrl, model, value, onChange }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [baseUrl, model, probed]);
+  }, [baseUrl, model]);
 
   // A model without a thinking channel cannot honour a level, so the stored
   // value is forced down rather than left to fail the next request.

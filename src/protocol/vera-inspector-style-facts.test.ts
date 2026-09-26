@@ -62,6 +62,26 @@ function element(tag = 'div', testId = 'subject'): HTMLElement {
   return node;
 }
 
+/** jsdom reports every rect as empty, so the overlap sampler needs a real box. */
+function setRect(el: Element, rect: { left: number; top: number; width: number; height: number }): void {
+  el.getBoundingClientRect = () =>
+    ({ ...rect, right: rect.left + rect.width, bottom: rect.top + rect.height, x: rect.left, y: rect.top }) as DOMRect;
+}
+
+/**
+ * jsdom has no `elementsFromPoint` at all, and the Bridge checks for it before
+ * using it. Installed as a configurable own property so the afterEach can take
+ * it away again — `vi.stubGlobal` would replace the whole `document`, which every
+ * other test in this file needs.
+ */
+function setElementsFromPoint(hits: () => Element[]): void {
+  Object.defineProperty(document, 'elementsFromPoint', {
+    value: hits,
+    configurable: true,
+    writable: true,
+  });
+}
+
 function propsOf(facts: StyleFacts | undefined): Record<string, string> {
   if (!facts) throw new Error('expected style facts');
   return facts.props;
@@ -106,6 +126,9 @@ afterEach(() => {
   // its own to fall back on, so leaving one behind would let a `fallback` verdict
   // decide the next test's fontLoad.
   Reflect.deleteProperty(document, 'fonts');
+  // Same reasoning: an `elementsFromPoint` left behind would put a caveat on the
+  // next test's contrast for a reason that has nothing to do with it.
+  Reflect.deleteProperty(document, 'elementsFromPoint');
   document.body.innerHTML = '';
 });
 
@@ -535,6 +558,112 @@ describe('derived contrast', () => {
       min: 3,
       pass: true,
     });
+  });
+
+  it('adds a shadow caveat while keeping the ratio it measured', () => {
+    // The ancestor walk looks for a background colour, and a box-shadow is not
+    // one, so a shadowed button produced a confident verdict about a backdrop
+    // that is not what is behind the glyphs. The number is still the best flat
+    // estimate, so it stays and the doubt travels with it.
+    stubComputedStyle({
+      color: 'rgb(30, 30, 30)',
+      'background-color': 'rgb(56, 132, 255)',
+      'font-size': '14px',
+      'font-weight': '600',
+      'box-shadow': '0 2px 8px rgba(0, 0, 0, 0.35)',
+    });
+    expect(derivedOf(collectStyleFacts(element()))?.contrast).toEqual({
+      ratio: 4.69,
+      min: 4.5,
+      pass: true,
+      large: false,
+      background: '#3884ff',
+      caveat: 'shadow',
+    });
+  });
+
+  it('finds a shadow on an ancestor, not only on the text element', () => {
+    const parent = element('section', 'ancestor');
+    const child = element('span', 'subject');
+    parent.appendChild(child);
+    stubComputedStylePerElement((el): Record<string, string> =>
+      el === child
+        ? { color: '#767676', 'background-color': '#ffffff', 'font-size': '14px', 'box-shadow': 'none' }
+        : { 'background-color': 'transparent', 'box-shadow': '0 1px 2px rgb(0, 0, 0)' },
+    );
+    expect(derivedOf(collectStyleFacts(child))?.contrast).toMatchObject({
+      ratio: 4.54,
+      pass: true,
+      caveat: 'shadow',
+    });
+  });
+
+  it('treats a fully transparent shadow as no shadow', () => {
+    // A transition or a reset leaves `rgba(0,0,0,0)` behind, which paints
+    // nothing. Reporting a caveat for it would cry wolf on every element.
+    stubComputedStyle({
+      color: '#767676',
+      'background-color': '#ffffff',
+      'font-size': '14px',
+      'box-shadow': '0 0 0 1px rgba(0, 0, 0, 0)',
+    });
+    expect(derivedOf(collectStyleFacts(element()))?.contrast).not.toHaveProperty('caveat');
+  });
+
+  it('adds an overlap caveat when another element is painted over the text box', () => {
+    // Siblings are invisible to the ancestor walk by construction, so a badge on
+    // top of a label used to produce a confident, wrong ratio.
+    const label = element('span', 'subject');
+    const badge = element('i', 'badge');
+    setRect(label, { left: 0, top: 0, width: 120, height: 20 });
+    setElementsFromPoint(() => [badge, label]);
+    stubComputedStyle({ color: '#767676', 'background-color': '#ffffff', 'font-size': '14px' });
+    expect(derivedOf(collectStyleFacts(label))?.contrast).toMatchObject({
+      ratio: 4.54,
+      pass: true,
+      caveat: 'overlap',
+    });
+  });
+
+  it('reports no overlap when the hit lands on the text element or a descendant', () => {
+    const label = element('span', 'subject');
+    const inner = document.createElement('em');
+    label.appendChild(inner);
+    setRect(label, { left: 0, top: 0, width: 120, height: 20 });
+    setElementsFromPoint(() => [inner]);
+    stubComputedStyle({ color: '#767676', 'background-color': '#ffffff', 'font-size': '14px' });
+    expect(derivedOf(collectStyleFacts(label))?.contrast).not.toHaveProperty('caveat');
+  });
+
+  it('reports no overlap when the hit is an ancestor of the text', () => {
+    // An ancestor holding the text is the normal case, not an intruder.
+    const wrapper = element('div', 'wrapper');
+    const label = element('span', 'subject');
+    wrapper.appendChild(label);
+    setRect(label, { left: 0, top: 0, width: 120, height: 20 });
+    setElementsFromPoint(() => [wrapper]);
+    stubComputedStyle({ color: '#767676', 'background-color': '#ffffff', 'font-size': '14px' });
+    expect(derivedOf(collectStyleFacts(label))?.contrast).not.toHaveProperty('caveat');
+  });
+
+  it('keeps the verdict when a 0x0 box makes overlap unanswerable', () => {
+    // jsdom has no layout, so every rect is empty. The detector must decline
+    // rather than invent a caveat from a box it could not measure.
+    setElementsFromPoint(() => [element('i', 'badge')]);
+    stubComputedStyle({ color: '#767676', 'background-color': '#ffffff', 'font-size': '14px' });
+    expect(derivedOf(collectStyleFacts(element()))?.contrast).toMatchObject({ ratio: 4.54, pass: true });
+    expect(derivedOf(collectStyleFacts(element()))?.contrast).not.toHaveProperty('caveat');
+  });
+
+  it('keeps the verdict when the browser has no elementsFromPoint', () => {
+    // The API is checked before use, so a runtime without it degrades to no
+    // caveat rather than to an exception mid-measurement.
+    // @ts-expect-error deleting an optional DOM method for the fallback path
+    delete document.elementsFromPoint;
+    const label = element('span', 'subject');
+    setRect(label, { left: 0, top: 0, width: 120, height: 20 });
+    stubComputedStyle({ color: '#767676', 'background-color': '#ffffff', 'font-size': '14px' });
+    expect(derivedOf(collectStyleFacts(label))?.contrast).toMatchObject({ ratio: 4.54, pass: true });
   });
 
   it('names the backdrop it measured against, for the brand blue probe button', () => {

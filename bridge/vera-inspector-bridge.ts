@@ -263,6 +263,9 @@ export interface StyleFactsGeometry {
   height: number;
 }
 
+/** See src/protocol/types.ts — kept in sync by hand; the bridge runs injected. */
+export type StyleFactsContrastCaveat = 'shadow' | 'overlap';
+
 export interface StyleFactsContrast {
   /** WCAG 2.x ratio, two decimals, 1..21. */
   ratio: number;
@@ -272,6 +275,8 @@ export interface StyleFactsContrast {
   large: boolean;
   /** The resolved backdrop the text is drawn on, as #rrggbb. */
   background: string;
+  /** Present only when something undermines the backdrop that was resolved. */
+  caveat?: StyleFactsContrastCaveat;
 }
 
 export interface StyleFactsDerived {
@@ -635,6 +640,92 @@ function contrastMinimum(fontSize: number, fontWeight: number): { min: number; l
 }
 
 /**
+ * A shadow painted behind the text.
+ *
+ * `box-shadow` is not a background, so the ancestor walk that resolves a flat
+ * backdrop walks straight past it — and a shadow is exactly the thing that
+ * changes the luminance under the glyphs. Detecting the string is cheap; working
+ * out whether the shadow's blur and offset actually intrude on the text box is
+ * geometry this function does not have, and a shadow that misses the text by a
+ * pixel is still worth mentioning because the reader cannot tell that from here.
+ */
+function hasShadowBehind(el: Element): boolean {
+  let current: Element | null = el;
+  while (current) {
+    let shadow: string;
+    try {
+      shadow = window.getComputedStyle(current).getPropertyValue('box-shadow');
+    } catch {
+      return false;
+    }
+    const text = (shadow ?? '').trim().toLowerCase();
+    if (text !== '' && text !== 'none') {
+      // A fully transparent shadow paints nothing, which happens from a
+      // transition or a reset. Treat it as absent.
+      const alpha = transparentShadow(text);
+      if (alpha === null || alpha > 0) return true;
+    }
+    const parent: Element | null = current.parentElement;
+    if (!parent) return false;
+    current = parent;
+  }
+  return false;
+}
+
+/** The alpha of a shadow's colour, or null when it has no colour token at all. */
+function transparentShadow(shadow: string): number | null {
+  const match = /rgba?\(([^)]+)\)/.exec(shadow);
+  if (!match) return null;
+  const parts = (match[1] ?? '').split(/[,\s/]+/).filter((part) => part !== '');
+  if (parts.length < 4) return null;
+  return parseStyleNumber(parts[3] ?? '');
+}
+
+/**
+ * Something other than the text element is painted over the text box.
+ *
+ * Sibling elements are invisible to the ancestor walk by construction, so a
+ * badge sitting on top of a label produces a confident, wrong ratio. Sampling a
+ * few interior points and asking the hit-tester what is there is the same
+ * question the pointer would ask. A point that hits the text element or one of
+ * its own descendants is ordinary; a point that hits a stranger is not.
+ */
+function hasOverlapOver(el: Element): boolean {
+  let rect: DOMRect;
+  try {
+    rect = el.getBoundingClientRect();
+  } catch {
+    return false;
+  }
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  if (typeof document.elementsFromPoint !== 'function') return false;
+  const insetX = Math.min(4, rect.width / 4);
+  const insetY = Math.min(4, rect.height / 4);
+  const points: Array<[number, number]> = [
+    [rect.left + insetX, rect.top + insetY],
+    [rect.right - insetX, rect.top + insetY],
+    [rect.left + insetX, rect.bottom - insetY],
+    [rect.right - insetX, rect.bottom - insetY],
+    [rect.left + rect.width / 2, rect.top + rect.height / 2],
+  ];
+  for (const [x, y] of points) {
+    let hits: Element[];
+    try {
+      hits = document.elementsFromPoint(x, y);
+    } catch {
+      return false;
+    }
+    const top = hits[0];
+    // Nothing there, or the text's own box: unremarkable. Only a hit that is
+    // neither the element nor inside it counts, and `contains` covers both
+    // directions without a second walk.
+    if (!top || top === el || el.contains(top) || top.contains(el)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
  * Three outcomes, not two. A verdict, `unmeasurable` when the styles were read
  * and the backdrop genuinely is not a flat colour, and null when the inputs
  * could not be read at all — an element with no text has no contrast, and
@@ -671,13 +762,23 @@ function collectContrast(
   const weight = parseStyleNumber(computed.getPropertyValue('font-weight')) ?? 400;
   const { min, large } = contrastMinimum(size, weight);
   const ratio = Math.round(contrastRatio(composedText, backdrop) * 100) / 100;
-  return {
+  // Both checks are cheap and both only add information. Reported as one value
+  // because the remedy is the same: the flat backdrop this ratio used is not
+  // the whole story, so re-check it by eye before acting on the verdict.
+  const caveat: StyleFactsContrastCaveat | undefined = hasShadowBehind(el)
+    ? 'shadow'
+    : hasOverlapOver(el)
+      ? 'overlap'
+      : undefined;
+  const verdict: StyleFactsContrast = {
     ratio,
     min,
     pass: ratio >= min,
     large,
     background: `#${channelHex(backdrop.r)}${channelHex(backdrop.g)}${channelHex(backdrop.b)}`,
+    ...(caveat === undefined ? {} : { caveat }),
   };
+  return verdict;
 }
 
 /**

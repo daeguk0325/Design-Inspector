@@ -107,6 +107,8 @@ const STYLE_FACT_CONTRAST_KEYS: ReadonlySet<string> = new Set([
   'large',
   'background',
 ]);
+/** The one optional key on a contrast verdict; see src/protocol/types.ts. */
+const STYLE_FACT_CONTRAST_CAVEATS: ReadonlySet<string> = new Set(['shadow', 'overlap']);
 const STYLE_FACT_UNMEASURABLE_KEYS: ReadonlySet<string> = new Set(['unmeasurable']);
 const STYLE_FACT_FONT_LOAD_VALUES: ReadonlySet<string> = new Set(['fallback', 'unknown']);
 const STYLE_FACT_HEX_COLOR = /^#[0-9a-f]{6}$/i;
@@ -509,8 +511,16 @@ function isStyleFactContrastValid(value: unknown): boolean {
     // Exactly the unmeasurable marker, nothing else riding along with it.
     return value['unmeasurable'] === true && hasOnlyKeys(value, STYLE_FACT_UNMEASURABLE_KEYS);
   }
-  if (!hasOnlyKeys(value, STYLE_FACT_CONTRAST_KEYS)) return false;
-  if (Object.keys(value).length !== STYLE_FACT_CONTRAST_KEYS.size) return false;
+  const keys = Object.keys(value);
+  const allowed = new Set(STYLE_FACT_CONTRAST_KEYS);
+  allowed.add('caveat');
+  if (!hasOnlyKeys(value, allowed)) return false;
+  // Every key required, plus the caveat, plus nothing else.
+  if (keys.length !== STYLE_FACT_CONTRAST_KEYS.size && keys.length !== STYLE_FACT_CONTRAST_KEYS.size + 1) {
+    return false;
+  }
+  const caveat = value['caveat'];
+  if (caveat !== undefined && !STYLE_FACT_CONTRAST_CAVEATS.has(caveat as string)) return false;
   const background = value['background'];
   return (
     // A ratio is the one non-integer number in the protocol, so it gets an

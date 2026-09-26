@@ -352,4 +352,39 @@ describe('PreviewSidecarParser', () => {
     expect(text).toBe(KOREAN_PREFIX);
     expect(candidate).not.toBeNull();
   });
+
+  it('removes a suppressed block from the text but never offers it', () => {
+    // The request ruled out a change, so the JSON must not print into the
+    // answer and must not become a pending card either.
+    const body = `${KOREAN_PREFIX}\`\`\`design-inspector-preview\n${VALID_BLOCK}\n\`\`\`\n`;
+    const parser = new PreviewSidecarParser({}, { suppressBlock: true });
+    let text = '';
+    for (const fragment of splitEvery(body, 7)) text += parser.push(fragment).text;
+    const flushed = parser.flush();
+    text += flushed.text;
+    expect(text).toBe(KOREAN_PREFIX);
+    expect(text).not.toContain('border-radius');
+    expect(flushed.candidate).toBeNull();
+    expect(parser.candidate).toBeNull();
+  });
+
+  it('counts a suppressed block apart from an invalid one', () => {
+    // Nothing is wrong with the payload; the request was. Folding this into
+    // blocksInvalid would make a stat report read like a model failure.
+    const body = `${KOREAN_PREFIX}\`\`\`design-inspector-preview\n${VALID_BLOCK}\n\`\`\`\n`;
+    const parser = new PreviewSidecarParser({}, { suppressBlock: true });
+    parser.push(body);
+    parser.flush();
+    expect(parser.stats.blocksSuppressed).toBe(1);
+    expect(parser.stats.blocksInvalid).toBe(0);
+    expect(parser.stats.blocksStripped).toBe(1);
+  });
+
+  it('still strips the payload when the request allows a change', () => {
+    const body = `${KOREAN_PREFIX}\`\`\`design-inspector-preview\n${VALID_BLOCK}\n\`\`\`\n`;
+    const parser = new PreviewSidecarParser({}, { suppressBlock: false });
+    parser.push(body);
+    expect(parser.flush().candidate).not.toBeNull();
+    expect(parser.stats.blocksSuppressed).toBe(0);
+  });
 });

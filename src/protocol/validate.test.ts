@@ -602,11 +602,25 @@ describe('style facts derived validation', () => {
   it('accepts a full derived block, and the unmeasurable form', () => {
     expect(withDerived({ contrast: VERDICT, truncated: true, fontLoad: 'fallback' }).ok).toBe(true);
     expect(withDerived({ contrast: { unmeasurable: true } }).ok).toBe(true);
-    // Each field is independently optional: the Bridge measures what it can.
     expect(withDerived({ truncated: true }).ok).toBe(true);
     expect(withDerived({ fontLoad: 'unknown' }).ok).toBe(true);
     // `derived` is a subset, like `props` and like the record itself.
     expect(withDerived({ fontLoad: 'fallback' }).ok).toBe(true);
+  });
+
+  it('accepts a contrast caveat and refuses a label it did not define', () => {
+    expect(withDerived({ contrast: { ...VERDICT, caveat: 'shadow' } }).ok).toBe(true);
+    expect(withDerived({ contrast: { ...VERDICT, caveat: 'overlap' } }).ok).toBe(true);
+    // A caveat the prompt never explains would put an undefined word in front
+    // of the model, which is worse than no caveat at all.
+    expect(withDerived({ contrast: { ...VERDICT, caveat: 'gradient' } }).ok).toBe(false);
+    expect(withDerived({ contrast: { ...VERDICT, caveat: true } }).ok).toBe(false);
+  });
+
+  it('refuses a caveat riding along with the unmeasurable marker', () => {
+    // The unmeasurable form is exactly one key by design: there is no verdict
+    // for a caveat to qualify.
+    expect(withDerived({ contrast: { unmeasurable: true, caveat: 'shadow' } }).ok).toBe(false);
   });
 
   it('rejects a derived block with an unknown key', () => {

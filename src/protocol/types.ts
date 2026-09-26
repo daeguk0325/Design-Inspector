@@ -54,6 +54,19 @@ export interface StyleFactsGeometry {
   height: number;
 }
 
+/**
+ * Why a verdict is softer than it looks.
+ *
+ * The ratio is computed against the flat backdrop found by walking the ancestor
+ * chain for a background colour. Two common things invalidate that walk without
+ * making it unmeasurable: a `box-shadow` behind the text changes the local
+ * luminance, and another element painted over or under the text is not on the
+ * chain at all. The number stays — it is still the best flat estimate — and the
+ * caveat travels with it, so the answer can say "4.69:1 pass, and there is a
+ * shadow behind it" instead of quietly implying certainty it does not have.
+ */
+export type StyleFactsContrastCaveat = 'shadow' | 'overlap';
+
 export interface StyleFactsContrast {
   /** WCAG 2.x ratio, two decimals, 1..21. */
   ratio: number;
@@ -63,6 +76,8 @@ export interface StyleFactsContrast {
   large: boolean;
   /** The resolved backdrop the text is drawn on, as #rrggbb. */
   background: string;
+  /** Present only when something undermines the backdrop that was resolved. */
+  caveat?: StyleFactsContrastCaveat;
 }
 
 export interface StyleFactsDerived {

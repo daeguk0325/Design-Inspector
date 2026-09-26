@@ -140,6 +140,30 @@ describe('sanitizeStyleFacts derived', () => {
     expect(kept?.derived).toEqual({ contrast: VERDICT, truncated: true, fontLoad: 'fallback' });
   });
 
+  it('keeps a recognised contrast caveat and refuses an unrecognised one', () => {
+    const shadowed = sanitizeStyleFacts({
+      props: { color: '#1e1e1e' },
+      derived: { contrast: { ...VERDICT, caveat: 'shadow' } },
+    });
+    expect(shadowed?.derived?.contrast).toEqual({ ...VERDICT, caveat: 'shadow' });
+
+    // Same bargain as every other derived key: all-or-nothing. Keeping the ratio
+    // and dropping the caveat would leave a verdict that reads as certain when
+    // the payload said it was not.
+    expect(
+      sanitizeStyleFacts({ props: {}, derived: { contrast: { ...VERDICT, caveat: 'gradient' } } }),
+    ).toBeUndefined();
+  });
+
+  it('drops a record whose contrast carries an extra key beside the caveat', () => {
+    expect(
+      sanitizeStyleFacts({
+        props: {},
+        derived: { contrast: { ...VERDICT, caveat: 'shadow', verdict: 'pass' } },
+      }),
+    ).toBeUndefined();
+  });
+
   it('drops the record when an unknown derived key is all it has', () => {
     // Same rule as an unknown top-level key: the payload is not what it claims,
     // so nothing from it is kept.
@@ -247,6 +271,27 @@ describe('formatStyleFacts', () => {
   it('falls back to the tag name and then to a neutral word', () => {
     expect(formatStyleFacts(facts(), '({1})').lines[0]).toContain('({1}) button');
     expect(formatStyleFacts({ props: { display: 'flex' } }, '({1})').lines[0]).toContain('({1}) element');
+  });
+
+  it('renders a contrast caveat as a suffix on the same token', () => {
+    // Same token, so the verdict and its limits cannot be separated on the way
+    // to the model, and so an existing exact-match assertion keeps its meaning.
+    const verdict = { ratio: 4.69, min: 4.5, pass: true, large: false, background: '#f0fdf4' };
+    const plain = formatStyleFacts({ props: { color: '#1e1e1e' }, derived: { contrast: verdict } }, '({1})');
+    expect(plain.lines.join('\n')).toContain('contrast 4.69:1 min 4.5 pass');
+    expect(plain.lines.join('\n')).not.toContain('shadow');
+
+    const shadowed = formatStyleFacts(
+      { props: { color: '#1e1e1e' }, derived: { contrast: { ...verdict, caveat: 'shadow' } } },
+      '({1})',
+    );
+    expect(shadowed.lines.join('\n')).toContain('contrast 4.69:1 min 4.5 pass (shadow behind)');
+
+    const overlapped = formatStyleFacts(
+      { props: { color: '#1e1e1e' }, derived: { contrast: { ...verdict, caveat: 'overlap' } } },
+      '({1})',
+    );
+    expect(overlapped.lines.join('\n')).toContain('(overlap above)');
   });
 
   it('collapses a four-sided box to one value and a symmetric pair to two', () => {

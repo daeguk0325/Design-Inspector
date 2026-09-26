@@ -188,9 +188,18 @@ function derivedRows(derived: StyleFactsDerived | undefined): Array<{ label: str
     if ('unmeasurable' in contrast) {
       rows.push({ label: 'Contrast', value: 'not measurable', swatch: null });
     } else {
+      // The caveat is appended rather than replacing the verdict: the ratio is
+      // still the best flat estimate, and hiding it behind a warning would cost
+      // the reader the number they came for.
+      const caveat =
+        contrast.caveat === 'shadow'
+          ? ' · shadow behind'
+          : contrast.caveat === 'overlap'
+            ? ' · something overlaps it'
+            : '';
       rows.push({
         label: 'Contrast',
-        value: `${contrast.ratio}:1 · AA ${contrast.pass ? 'pass' : 'fail'} (min ${contrast.min})`,
+        value: `${contrast.ratio}:1 · AA ${contrast.pass ? 'pass' : 'fail'} (min ${contrast.min})${caveat}`,
         swatch: contrast.background,
       });
     }

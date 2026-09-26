@@ -14,7 +14,7 @@ import {
   styleFactGroup,
 } from './properties.ts';
 import type { StyleFactGroup } from './properties.ts';
-import type { StyleFacts, StyleFactsDerived } from '../protocol/types.ts';
+import type { StyleFacts, StyleFactsDerived, StyleFactsContrastCaveat } from '../protocol/types.ts';
 
 export const STYLE_FACT_VALUE_CHARS = 120;
 export const STYLE_FACT_LABEL_CHARS = 80;
@@ -34,6 +34,7 @@ const ZERO_LENGTH = /^0(?:\.0+)?(?:px|em|rem|%|pt|ch|vh|vw|vmin|vmax)?$/;
 const SIDES = ['top', 'right', 'bottom', 'left'] as const;
 const GEOMETRY_KEYS = ['x', 'y', 'width', 'height'] as const;
 const CONTRAST_KEYS = ['ratio', 'min', 'pass', 'large', 'background'] as const;
+const CONTRAST_CAVEATS = new Set(['shadow', 'overlap']);
 const DERIVED_KEYS = ['contrast', 'truncated', 'fontLoad'] as const;
 const FONT_LOAD_VALUES: ReadonlySet<string> = new Set(['fallback', 'unknown']);
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
@@ -91,9 +92,13 @@ function sanitizeContrast(value: unknown): StyleFactsDerived['contrast'] {
     return { unmeasurable: true };
   }
   for (const key of Object.keys(value)) {
+    if (key === 'caveat') continue;
     if (!CONTRAST_KEYS.includes(key as (typeof CONTRAST_KEYS)[number])) return undefined;
   }
-  if (Object.keys(value).length !== CONTRAST_KEYS.length) return undefined;
+  const count = Object.keys(value).length;
+  if (count !== CONTRAST_KEYS.length && count !== CONTRAST_KEYS.length + 1) return undefined;
+  const caveat = value['caveat'];
+  if (caveat !== undefined && !CONTRAST_CAVEATS.has(caveat as string)) return undefined;
   const ratio = value['ratio'];
   const min = value['min'];
   const background = value['background'];
@@ -107,6 +112,10 @@ function sanitizeContrast(value: unknown): StyleFactsDerived['contrast'] {
     pass: value['pass'],
     large: value['large'],
     background: background.toLowerCase(),
+    // Present only when recognised, because an unrecognised label was already
+    // refused above rather than silently stripped: a caveat dropped on the floor
+    // would leave a verdict that reads as certain when it was not.
+    ...(CONTRAST_CAVEATS.has(caveat as string) ? { caveat: caveat as StyleFactsContrastCaveat } : {}),
   };
 }
 
@@ -329,7 +338,16 @@ function derivedLineOf(derived: StyleFactsDerived | undefined): string | null {
     if ('unmeasurable' in contrast) {
       parts.push('contrast unmeasurable');
     } else {
-      parts.push(`contrast ${contrast.ratio}:1 min ${contrast.min} ${contrast.pass ? 'pass' : 'fail'}`);
+      // The caveat rides in the same token so the verdict and its limits cannot
+      // be separated on the way to the model. Written as a suffix rather than a
+      // second sentence, because a second sentence is something to paraphrase.
+      const caveat =
+        contrast.caveat === 'shadow'
+          ? ' (shadow behind)'
+          : contrast.caveat === 'overlap'
+            ? ' (overlap above)'
+            : '';
+      parts.push(`contrast ${contrast.ratio}:1 min ${contrast.min} ${contrast.pass ? 'pass' : 'fail'}${caveat}`);
     }
   }
   if (derived.truncated === true) parts.push('text-truncated');
