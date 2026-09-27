@@ -1,4 +1,12 @@
 /**
+ * React only treats `act()` as a real act when the environment says so, and
+ * without this every file that renders a hook writes the same line at the top
+ * and every test that forgets it fills the log with a warning that is noise
+ * about the harness rather than about the code under test.
+ */
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+/**
  * jsdom shims for the DOM APIs Lexical touches but jsdom does not implement.
  *
  * When Lexical scrolls the caret into view it measures the current range, which

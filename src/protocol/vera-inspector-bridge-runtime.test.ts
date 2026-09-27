@@ -235,9 +235,13 @@ describe('bridge presence', () => {
     expect(present[0]?.payload['documentGeneration']).toBe(harness.bridge.documentGeneration);
     expect(present[0]?.payload['capabilities']).toMatchObject({
       cssPreview: true,
-      maxPreviewChanges: 12,
+      maxPreviewChanges: 256,
       maxPreviewPropertiesPerChange: 12,
       maxPreviewValueLength: 120,
+      // The Bridge has to say which preview shape it speaks. Without it the App
+      // cannot tell a v1 target that lacks an operation from a malformed one,
+      // and both arrive as the same bare `rejected`.
+      previewSchemaVersion: 2,
     });
   });
 

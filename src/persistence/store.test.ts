@@ -45,6 +45,7 @@ const transaction: PreviewTransaction = {
   ],
   enabled: true,
   status: 'applied',
+  producer: { kind: 'chat' as const },
   createdAt: 1,
   updatedAt: 2,
 };
@@ -541,6 +542,76 @@ describe('persistence', () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(shape));
     const loaded = loadPersisted();
     expect(loaded.shape.sessions[0]?.messages[0]).toMatchObject({ status: 'interrupted' });
+  });
+
+  /**
+   * I12 — a load that silently shortens a session is a bug, so it is counted.
+   *
+   * The sanitizer discards records it cannot parse rather than failing the load,
+   * which is the right behaviour for one corrupt anchor and the wrong behaviour
+   * for a schema change that makes every existing record unparseable. Without a
+   * count the only symptom is a shorter history and no message.
+   */
+  it('I12: a corrupt preview transaction is dropped and counted, not silently', () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        data: {
+          sessions: [
+            {
+              id: 's1',
+              title: 'T',
+              targetUrl: 'http://localhost:3000/checkout',
+              model: 'm',
+              messages: [],
+              previewTransactions: [transaction, { nonsense: true }, transaction],
+              persistedActiveSelectionIds: [],
+              createdAt: 1,
+              updatedAt: 2,
+            },
+          ],
+          currentSessionId: 's1',
+        },
+      }),
+    );
+    const loaded = loadPersisted();
+    expect(loaded.shape.sessions[0]?.previewTransactions).toHaveLength(2);
+    expect(loaded.droppedPreviewTransactions).toBe(1);
+    expect(loaded.recoveredFromCorruption).toBe(false);
+  });
+
+  it('I12b: a clean load reports nothing dropped', () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        data: {
+          sessions: [
+            {
+              id: 's1',
+              title: 'T',
+              targetUrl: 'http://localhost:3000/checkout',
+              model: 'm',
+              messages: [],
+              previewTransactions: [transaction],
+              persistedActiveSelectionIds: [],
+              createdAt: 1,
+              updatedAt: 2,
+            },
+          ],
+          currentSessionId: 's1',
+        },
+      }),
+    );
+    expect(loadPersisted().droppedPreviewTransactions).toBe(0);
+  });
+
+  it('I12c: a missing store reports nothing dropped rather than undefined', () => {
+    localStorage.removeItem(STORAGE_KEY);
+    const loaded = loadPersisted();
+    expect(loaded.droppedPreviewTransactions).toBe(0);
+    expect(loaded.shape.sessions).toEqual([]);
   });
 });
 

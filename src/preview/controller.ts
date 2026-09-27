@@ -14,6 +14,7 @@ import type {
   PreviewTransaction,
 } from './transaction.ts';
 import { MAX_PREVIEW_RULES, MAX_PREVIEW_TARGET } from './contract.ts';
+import { isMateriallyDifferentTarget } from '../url/policy.ts';
 import { pendingForSession, proposalsIn, proposalSummaryLines } from './proposal.ts';
 import type { MessagePreviewStatus } from '../components/ChatList.tsx';
 
@@ -60,7 +61,57 @@ function resultStatus(result: PreviewResultPayload): PreviewRuntimeStatus {
 }
 
 function transactionEnabled(status: PreviewRuntimeStatus): boolean {
-  return status === 'applied' || status === 'pending-rebind' || status === 'unbound' || status === 'ambiguous';
+  return (
+    status === 'applied' ||
+    status === 'partial' ||
+    status === 'pending-rebind' ||
+    status === 'unbound' ||
+    status === 'ambiguous'
+  );
+}
+
+/**
+ * The Bridge reports one status for a whole transaction and calls it `rejected`
+ * when *any* anchor failed. Nine of ten elements changing is not the same event
+ * as none of them changing, and collapsing the two is what made a transaction
+ * that the Bridge was still holding a live layer for get marked `rejected` — and
+ * therefore `enabled: false`, and therefore invisible to `undo` (which returns
+ * early on a disabled transaction) and to `reset` (which filters on `enabled`).
+ * The result was DOM mutations no path in the App could ever take back.
+ *
+ * The per-anchor array was on the wire the whole time. This is where it gets read.
+ *
+ * Only valid for an `apply` result. Undo and reset also carry per-anchor entries
+ * whose `applied` means "was applied", and reading them this way would report a
+ * successful undo as `partial`.
+ */
+function deriveApplyStatus(result: PreviewResultPayload): {
+  status: PreviewRuntimeStatus;
+  applied: number;
+} {
+  let applied = 0;
+  for (const anchor of result.anchors) {
+    if (anchor.status === 'applied') applied += 1;
+  }
+  if (result.status === 'applied') return { status: 'applied', applied };
+  if (applied > 0) return { status: 'partial', applied };
+  return { status: resultStatus(result), applied };
+}
+
+/** Operations added in schema v2, which a v1 Bridge has no way to express. */
+function requiresSchemaV2(changes: readonly PreviewChangeRecord[]): boolean {
+  for (const change of changes) {
+    if (change.text !== undefined || change.replaceText !== undefined || change.element !== undefined) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** A Bridge that advertises no version predates the field, which means v1. */
+function bridgeSchemaVersion(active: BridgeApi): number {
+  const advertised = active.snapshot?.capabilities?.previewSchemaVersion;
+  return typeof advertised === 'number' ? advertised : 1;
 }
 
 /**
@@ -110,6 +161,8 @@ function previewChangesFor(completion: ChatCompletion): PreviewChangeRecord[] | 
 
 export function usePreviewController({ bridge, session, updateSession, autoEnabled }: ControllerInput): PreviewController {
   const appliedScopes = useRef(new Set<string>());
+  /** The `bindingGeneration` the current `appliedScopes` entries were claimed under. */
+  const scopesGeneration = useRef<number | null>(null);
   const inFlight = useRef(new Set<string>());
   const sessionRef = useRef(session);
   const updateSessionRef = useRef(updateSession);
@@ -137,7 +190,16 @@ export function usePreviewController({ bridge, session, updateSession, autoEnabl
 
   const claimScope = useCallback((ownerId: string, transactionId: string): boolean => {
     const active = bridgeRef.current;
-    const routeScope = `${ownerId}|${active.sessionBindingId ?? ''}|${active.routeEpoch ?? 0}|${active.snapshot?.documentGeneration ?? ''}`;
+    if (scopesGeneration.current !== active.bindingGeneration) {
+      // Every claim made under an older binding is void. The `resetSession` that
+      // bumped the generation also destroyed the layers those claims were
+      // guarding, so keeping them would suppress the re-apply on the way back —
+      // the same bug, deferred by one generation — and would grow the Set
+      // without bound across rebinds.
+      appliedScopes.current.clear();
+      scopesGeneration.current = active.bindingGeneration;
+    }
+    const routeScope = `${ownerId}|${active.sessionBindingId ?? ''}|${active.bindingGeneration}|${active.routeEpoch ?? 0}|${active.snapshot?.documentGeneration ?? ''}`;
     const key = `${routeScope}|${transactionId}`;
     if (appliedScopes.current.has(key)) return false;
     appliedScopes.current.add(key);
@@ -152,6 +214,42 @@ export function usePreviewController({ bridge, session, updateSession, autoEnabl
     if (!active.ready || !active.snapshot?.capabilities?.cssPreview) return;
     if (!transaction.enabled || !transactionEnabled(transaction.status)) return;
     if (inFlight.current.has(transaction.id)) return;
+
+    // A transaction records the URL it was authored against. A retarget moves the
+    // session's URL without rewriting its history, so applying an old
+    // transaction to the new page is a silent restyle of something the user has
+    // navigated away from. `isMateriallyDifferentTarget` rather than `!==`,
+    // because a query-string or hash change keeps the same page and must not
+    // invalidate anything.
+    //
+    // 'stale-binding' is already in the status union, already accepted by the
+    // persisted-state parser, and already rendered. Nothing ever wrote it.
+    const staleTarget =
+      transaction.targetUrl !== current.targetUrl &&
+      isMateriallyDifferentTarget(transaction.targetUrl, current.targetUrl);
+    if (staleTarget) {
+      patchTransaction(ownerId, transaction.id, { status: 'stale-binding', enabled: false });
+      return;
+    }
+
+    // The Bridge tears down every layer when the binding changes, so a command
+    // posted into a binding that is not this session's lands on nothing and then
+    // gets cleaned up under the wrong owner. `scopeIsCurrent` guards the *result*
+    // of a preview; nothing was guarding the emission.
+    if (active.sessionBindingId !== null && active.sessionBindingId !== ownerId) return;
+
+    // A v1 Bridge answers a v2 operation with the same bare `rejected` it returns
+    // for a malformed payload. Without this the user's only symptom is a preview
+    // that never appears, with no way to tell a version mismatch from a mistake.
+    if (bridgeSchemaVersion(active) < 2 && requiresSchemaV2(transaction.changes)) {
+      patchTransaction(ownerId, transaction.id, {
+        status: 'rejected',
+        enabled: false,
+        errorCode: 'bridge-preview-schema-too-old',
+      });
+      return;
+    }
+
     inFlight.current.add(transaction.id);
     try {
       const changes: PreviewAnchorChange[] = transaction.changes.map((change) => ({
@@ -162,11 +260,14 @@ export function usePreviewController({ bridge, session, updateSession, autoEnabl
         ...(change.element === undefined ? {} : { element: change.element }),
       }));
       const result = await active.applyPreview(ownerId, transaction.id, changes);
-      const status = resultStatus(result);
+      const { status, applied } = deriveApplyStatus(result);
       patchTransaction(ownerId, transaction.id, {
         status,
         enabled: transactionEnabled(status),
-        ...(status === 'rejected' ? { errorCode: result.status } : {}),
+        appliedChanges: applied,
+        // Cleared rather than left to a merge, so a retry that succeeds does not
+        // keep advertising the previous failure.
+        errorCode: status === 'rejected' ? result.status : undefined,
       });
     } catch {
       patchTransaction(ownerId, transaction.id, {
@@ -204,6 +305,7 @@ export function usePreviewController({ bridge, session, updateSession, autoEnabl
       changes,
       enabled: true,
       status: 'pending-rebind',
+      producer: { kind: 'chat' },
       createdAt: now,
       updatedAt: now,
     };
@@ -368,6 +470,9 @@ export function usePreviewController({ bridge, session, updateSession, autoEnabl
         status: transaction.status,
         enabled: transaction.enabled,
         changeCount: transaction.changes.length,
+        ...(transaction.appliedChanges === undefined
+          ? {}
+          : { appliedChanges: transaction.appliedChanges }),
         errorCode: transaction.errorCode,
       });
     }

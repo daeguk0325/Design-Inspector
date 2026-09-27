@@ -977,7 +977,13 @@ const PREVIEW_MAX_TAG_CHARS = 64;
 const PREVIEW_MAX_ANCHOR_ID_CHARS = 256;
 const PREVIEW_MAX_TEST_ID_CHARS = 256;
 const PREVIEW_MAX_PATH_CHARS = 1_024;
-const PREVIEW_MAX_CHANGES = 12;
+// Anchors per APPLY. Mirrors MAX_TRANSACTION_CHANGES in src/preview/transaction.ts,
+// which is a different number from the App's model-block rule cap on purpose: a
+// design theme is one atomic transaction and has to fit in one layer, and
+// PREVIEW_MAX_LAYERS_PER_BINDING below caps how many of those can coexist.
+// The duplication between the two is the trust boundary, not an oversight — the
+// Bridge cannot import from src/ (see the transpile note at the top of this file).
+const PREVIEW_MAX_CHANGES = 256;
 const PREVIEW_MAX_DECLARATIONS = 12;
 const PREVIEW_MAX_VALUE_CHARS = 120;
 const PREVIEW_MAX_REPLACE_TEXT_CHARS = 200;
@@ -996,6 +1002,23 @@ const PREVIEW_ATTRIBUTE_PREFIX = 'data-vera-inspector-pv-';
 const PREVIEW_LAYER_MARKER = 'preview-layer';
 const PREVIEW_NO_TRANSACTION = '*';
 const PREVIEW_REMOVED_PLACEHOLDER = 'vera-inspector-preview-removed';
+
+/**
+ * The preview wire shape this Bridge understands, advertised in `capabilities`.
+ *
+ * The Bridge is injected into the target page by the proxy and is fixed for the
+ * life of that page load, while the App is upgraded independently. A target tab
+ * opened before an upgrade therefore keeps an older Bridge, and without this
+ * number the App cannot tell "this operation does not exist on that Bridge" from
+ * "you sent a malformed operation" — both arrive as a bare `rejected`, and the
+ * user's only symptom is a preview that silently does not appear.
+ *
+ * A Bridge predating this field sends no version at all. The App treats that as
+ * version 1, which is the honest reading: no advertisement means the v1 shape.
+ */
+const PREVIEW_SCHEMA_VERSION = 2;
+
+
 const PREVIEW_CHANGE_KEYS: ReadonlySet<string> = new Set([
   'anchor',
   'declarations',
@@ -1580,6 +1603,7 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
     maxPreviewChanges: PREVIEW_MAX_CHANGES,
     maxPreviewPropertiesPerChange: PREVIEW_MAX_DECLARATIONS,
     maxPreviewValueLength: PREVIEW_MAX_VALUE_CHARS,
+    previewSchemaVersion: PREVIEW_SCHEMA_VERSION,
   };
   let mode: BridgeMode = options.initialMode ?? 'html';
   let frozen = false;
@@ -3261,6 +3285,12 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
       const status: PreviewAnchorStatus = failedKeys.has(entry.anchor.elementKey) ? 'rejected' : 'applied';
       pushAnchorResult(results, seen, entry.anchor.elementKey, status, 1);
     }
+    // Deliberately coarse. One anchor failing does not mean the transaction did
+    // nothing, and reporting `rejected` for "9 of 10 applied" is what once let
+    // the App disable a transaction the Bridge was still holding a live layer
+    // for. The per-anchor array above is the truth; the App derives `partial`
+    // from it rather than reading this field. Widening the protocol to say
+    // "partial" here would only move the same information to a second place.
     sendPreviewResult(
       'apply',
       bindingId,

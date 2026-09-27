@@ -380,6 +380,31 @@ describe('ChatList decision controls', () => {
     expect(container.querySelector('.preview-row')).toBeNull();
   });
 
+  it('names how much of a partial application actually landed', () => {
+    const { container } = renderPreview({
+      status: 'partial',
+      enabled: true,
+      changeCount: 12,
+      appliedChanges: 9,
+      summaryLines: ['PrimaryButton: padding 12px'],
+    });
+    // Not styled as a failure: there are live mutations on the page, so it is
+    // still undoable. But the page is not what was asked for, so the count has
+    // to be visible — "partly applied" alone is not something a user can act on.
+    expect(container.querySelector('.preview-partial')?.textContent).toBe('Partly applied (9/12)');
+    expect(container.querySelector('.preview-error')).toBeNull();
+    expect(container.querySelectorAll('.decide-btn')).toHaveLength(2);
+  });
+
+  it('still names a partial application when the counts are unknown', () => {
+    const { container } = renderPreview({
+      status: 'partial',
+      enabled: true,
+      summaryLines: ['PrimaryButton: padding 12px'],
+    });
+    expect(container.querySelector('.preview-partial')?.textContent).toBe('Partly applied');
+  });
+
   it('is absent without a handler and on user messages', () => {
     const container = mount(
       <ChatList

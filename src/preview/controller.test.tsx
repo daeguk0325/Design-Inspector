@@ -1,4 +1,4 @@
-import { act } from 'react';
+﻿import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
@@ -13,11 +13,9 @@ import type {
   PreviewResultStatus,
 } from '../protocol/types.ts';
 import type { ChatMessage, CitationSnapshot, InspectorSession } from '../state/models.ts';
-import { MAX_PREVIEW_RULES, MAX_PREVIEW_TARGET } from './contract.ts';
+import { MAX_PREVIEW_RULES, MAX_PREVIEW_TARGET, PREVIEW_SCHEMA_VERSION } from './contract.ts';
 import type { DesignDecision, PreviewTransaction } from './transaction.ts';
 import { usePreviewController, type PreviewController } from './controller.ts';
-
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const ROUTE_KEY = '/orders';
 
@@ -49,8 +47,15 @@ interface BridgeState {
   cssPreview: boolean;
   sessionBindingId: string | null;
   routeEpoch: number | null;
+  /**
+   * Stands in for the counter the real `useBridge` bumps in `resetSession`.
+   * `switchTo` in the fake store advances it the same way, because that is what
+   * makes a session round trip distinguishable from a no-op.
+   */
+  bindingGeneration: number;
   documentGeneration: string;
   routeKey: string | undefined;
+  previewSchemaVersion: number;
   applyStatus: PreviewResultStatus;
   undoStatus: PreviewResultStatus;
   resetStatus: PreviewResultStatus;
@@ -118,10 +123,16 @@ function createBridge(): BridgeMock {
   const state: BridgeState = {
     ready: true,
     cssPreview: true,
-    sessionBindingId: 's-a',
+    // Unbound until a test or a `switchTo` binds it, which is the real initial
+    // state before `bindSession` runs. Hardcoding a session id here used to
+    // model a binding that disagrees with the current session — a state the App
+    // cannot produce, and one the emission guard correctly refuses to post into.
+    sessionBindingId: null,
     routeEpoch: 3,
+    bindingGeneration: 0,
     documentGeneration: 'doc-1',
     routeKey: ROUTE_KEY,
+    previewSchemaVersion: PREVIEW_SCHEMA_VERSION,
     applyStatus: 'applied',
     undoStatus: 'undone',
     resetStatus: 'reset',
@@ -154,6 +165,7 @@ function createBridge(): BridgeMock {
         maxImagePixels: 2_097_152,
         cssPreview: state.cssPreview,
         maxPreviewChanges: MAX_PREVIEW_RULES,
+        previewSchemaVersion: state.previewSchemaVersion,
       },
       ...(state.routeKey === undefined ? {} : { routeKey: state.routeKey }),
     };
@@ -167,6 +179,7 @@ function createBridge(): BridgeMock {
       mode: 'html',
       sessionBindingId: state.sessionBindingId,
       routeEpoch: state.routeEpoch,
+      bindingGeneration: state.bindingGeneration,
       iframeRef: { current: null },
       targetUrl: 'http://127.0.0.1:4173/app',
       setTargetUrl: vi.fn(),
@@ -209,7 +222,6 @@ function createStore(sessions: InspectorSession[], currentId: string | null): St
   };
   return store;
 }
-
 async function settle(rounds = 6): Promise<void> {
   for (let index = 0; index < rounds; index += 1) {
     await act(async () => {
@@ -225,6 +237,19 @@ function mount(store: Store, bridge: BridgeMock): Harness {
   const root = createRoot(container);
   mounted.push({ root, container });
   let autoEnabled = true;
+
+  // The real App calls `bindSession` whenever the current session changes, and
+  // that runs `resetSession`, which bumps `bindingGeneration` and re-points the
+  // binding at the new session. The fake store's `switchTo` only moved the id, so
+  // without this the harness modelled a session switch that left the Bridge
+  // completely untouched — a state the real flow can never be in, and the state
+  // the claimScope bug was hiding inside, which is why the old assertion passed.
+  const rawSwitchTo = store.switchTo;
+  store.switchTo = (id) => {
+    rawSwitchTo(id);
+    bridge.state.sessionBindingId = id;
+    bridge.state.bindingGeneration += 1;
+  };
   function Probe(props: ProbeProps) {
     holder.current = usePreviewController(props);
     return null;
@@ -331,12 +356,23 @@ function session(
   };
 }
 
-function candidate(rules: Array<{ target: number; declarations?: Record<string, string> }>) {
+type CandidateRule = {
+  target: number;
+  declarations?: Record<string, string>;
+  text?: 'clear';
+  replaceText?: string;
+  element?: 'hide' | 'remove';
+};
+
+function candidate(rules: CandidateRule[]) {
   return {
     version: 1 as const,
     rules: rules.map((rule) => ({
       target: rule.target,
       declarations: rule.declarations ?? { color: '#111111' },
+      ...(rule.text === undefined ? {} : { text: rule.text }),
+      ...(rule.replaceText === undefined ? {} : { replaceText: rule.replaceText }),
+      ...(rule.element === undefined ? {} : { element: rule.element }),
     })),
   };
 }
@@ -639,7 +675,7 @@ describe('preview controller session isolation and duplicate suppression', () =>
     expect(harness.bridge.applyPreview).not.toHaveBeenCalled();
   });
 
-  it('keeps previews scoped to the current session across a switch', async () => {
+  it('re-applies to the target after an A→B→A round trip', async () => {
     const harness = mount(
       createStore([session('s-a'), session('s-b')], 's-a'),
       createBridge(),
@@ -658,7 +694,13 @@ describe('preview controller session isolation and duplicate suppression', () =>
     harness.render();
     expect(harness.controller().activeCount).toBe(1);
     expect(harness.transaction('a1').status).toBe('applied');
-    expect(harness.bridge.applyPreview).toHaveBeenCalledTimes(1);
+    // 2, not 1. Switching away runs `resetSession`, which destroys every layer
+    // on the target, so coming back has to put them back. The old assertion of 1
+    // was locking in the bug: the session read `applied` throughout while the
+    // page carried nothing, because the claim key was byte-identical on both
+    // sides of the switch and answered "already applied".
+    expect(harness.bridge.applyPreview).toHaveBeenCalledTimes(2);
+    expect(applyCalls(harness.bridge).map((call) => call.bindingId)).toEqual(['s-a', 's-a']);
   });
 
   it('applies a transaction of the session that becomes current later', async () => {
@@ -1131,15 +1173,36 @@ describe('preview controller route scope reapplication', () => {
     expect(harness.transaction('a1').status).toBe('applied');
   });
 
-  it('reapplies enabled transactions after the bridge binding changes', async () => {
+  it('reapplies enabled transactions after the binding is re-established', async () => {
     const harness = mount(createStore([session('s-a')], 's-a'), createBridge());
     await applyClean(harness);
-    harness.bridge.state.sessionBindingId = 's-a-2';
+    // What `bindSession` does when a session is re-bound after a switch: the
+    // binding is the same session, but `resetSession` has bumped the generation
+    // and destroyed every layer, so the claim key has to differ or nothing goes
+    // back on the page.
+    harness.bridge.state.sessionBindingId = 's-a';
+    harness.bridge.state.bindingGeneration += 1;
     harness.render();
     await harness.settle();
     harness.render();
     expect(applyCalls(harness.bridge).map((call) => call.bindingId)).toEqual(['s-a', 's-a']);
     expect(harness.bridge.applyPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses to post a transaction into a binding owned by another session', async () => {
+    const harness = mount(createStore([session('s-a'), session('s-b')], 's-a'), createBridge());
+    await applyClean(harness);
+    expect(applyCalls(harness.bridge).map((call) => call.bindingId)).toEqual(['s-a']);
+
+    // The Bridge tears down its layers on a binding change, so a command posted
+    // under the old session id after that point creates a layer the App will
+    // never clean up under an owner that no longer exists.
+    harness.bridge.state.sessionBindingId = 's-b';
+    harness.bridge.state.routeEpoch = 30;
+    harness.render();
+    await harness.settle();
+    harness.render();
+    expect(applyCalls(harness.bridge).map((call) => call.bindingId)).toEqual(['s-a']);
   });
 
   it('reapplies every enabled transaction of the current session only', async () => {
@@ -1599,5 +1662,215 @@ describe('rewind', () => {
     });
     await settle();
     expect(harness.store.current()!.messages.some((m) => m.id === target.id)).toBe(false);
+  });
+});
+
+/**
+ * The invariant ledger.
+ *
+ * `docs/PREVIEW_INVARIANTS.md` is the readable copy; this block is the part that
+ * fails. Each `it` names the invariant it pins, and the ones marked KNOWN-BROKEN
+ * are pinned *in their broken state* on purpose: they document what the system
+ * does today so that whatever changes them next has to change a test that says
+ * so out loud, rather than silently inheriting the behaviour.
+ */
+describe('preview invariants', () => {
+  /**
+   * I1 — a transaction the Bridge partly applied is still reachable.
+   *
+   * This is the one that used to leak. The Bridge reports `rejected` for the
+   * whole transaction when any anchor fails, the App used to take that at face
+   * value and set `enabled: false`, and `undo` returns early on a disabled
+   * transaction while `reset` filters on `enabled`. Nine applied elements with
+   * live DOM mutations became unreachable from every control in the app.
+   */
+  it('I1: a partially applied transaction stays enabled and undoable', async () => {
+    const harness = mount(createStore([pairSession('s-a')], 's-a'), createBridge());
+    harness.bridge.state.applyResponder = (call) =>
+      Promise.resolve({
+        ...previewResult('apply', 'rejected', call),
+        anchors: [
+          { elementKey: 'button.one', status: 'applied' as const, matchCount: 1 },
+          { elementKey: 'button.two', status: 'rejected' as const, matchCount: 0 },
+        ],
+      });
+    await applyClean(harness, pairCompletion('a1'));
+    await applyClean(harness, pairCompletion('a2'));
+
+    const first = harness.transaction('a1');
+    expect(first?.status).toBe('partial');
+    expect(first?.appliedChanges).toBe(1);
+    expect(first?.enabled).toBe(true);
+
+    const undo = harness.bridge.undoPreview;
+    undo.mockClear();
+    await act(async () => {
+      await harness.controller().decide('a1', 'rejected');
+    });
+    await settle();
+    expect(undo).toHaveBeenCalledTimes(1);
+    expect(harness.transaction('a1')?.enabled).toBe(false);
+  });
+
+  it('I2: a fully rejected transaction is disabled and not offered to undo', async () => {
+    const harness = mount(createStore([session('s-a')], 's-a'), createBridge());
+    harness.bridge.state.applyResponder = (call) =>
+      Promise.resolve({
+        ...previewResult('apply', 'rejected', call),
+        anchors: [{ elementKey: 'button.primary', status: 'rejected' as const, matchCount: 0 }],
+      });
+    await applyClean(harness);
+    expect(harness.transaction('a1')?.status).toBe('rejected');
+    expect(harness.transaction('a1')?.enabled).toBe(false);
+    expect(harness.controller().activeCount).toBe(0);
+  });
+
+  /**
+   * I3 — a transaction is never applied to a page it was not authored against.
+   */
+  it('I3: a transaction from a different target is marked stale and never posted', async () => {
+    const harness = mount(
+      createStore([session('s-a', { targetUrl: 'http://127.0.0.1:4173/one' })], 's-a'),
+      createBridge(),
+    );
+    const restored: PreviewTransaction = {
+      id: 'pv-stale',
+      assistantId: 'a1',
+      userMessageId: 'u1',
+      sessionId: 's-a',
+      targetUrl: 'http://127.0.0.1:4173/two',
+      routeKey: ROUTE_KEY,
+      changes: [{ target: 1, anchor: anchor(), declarations: { color: '#111111' } }],
+      enabled: true,
+      status: 'pending-rebind',
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    harness.store.updateSession('s-a', (s) => ({
+      ...s,
+      previewTransactions: [restored],
+    }));
+    harness.render();
+    await harness.settle();
+    harness.render();
+
+    expect(harness.bridge.applyPreview).not.toHaveBeenCalled();
+    expect(harness.store.session('s-a')?.previewTransactions[0]?.status).toBe('stale-binding');
+  });
+
+  it('I4: a stale transaction is not retried by the rebind effect', async () => {
+    const harness = mount(createStore([session('s-a')], 's-a'), createBridge());
+    harness.store.updateSession('s-a', (s) => ({
+      ...s,
+      previewTransactions: [
+        {
+          id: 'pv-stale',
+          assistantId: 'a1',
+          userMessageId: 'u1',
+          sessionId: 's-a',
+          targetUrl: 'http://elsewhere.test/app',
+          routeKey: ROUTE_KEY,
+          changes: [{ target: 1, anchor: anchor(), declarations: { color: '#111111' } }],
+          enabled: true,
+          status: 'stale-binding',
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+    }));
+    harness.render();
+    await harness.settle();
+    harness.render();
+    // `transactionEnabled` deliberately excludes `stale-binding`, so the effect
+    // skips it and a re-render storm cannot resurrect it.
+    expect(harness.bridge.applyPreview).not.toHaveBeenCalled();
+  });
+
+  /**
+   * I5 — the claim set does not grow across rebinds.
+   *
+   * There is no public window onto the Set, so this pins the observable half: a
+   * long run of binds and switches still applies each transaction exactly once
+   * per binding, which is what an unbounded Set would break.
+   */
+  it('I5: repeated binds and switches keep applying exactly once per binding', async () => {
+    const harness = mount(
+      createStore([pairSession('s-a'), pairSession('s-b')], 's-a'),
+      createBridge(),
+    );
+    await applyClean(harness, pairCompletion('a1', 's-a'));
+    expect(harness.bridge.applyPreview).toHaveBeenCalledTimes(1);
+    for (let round = 0; round < 5; round += 1) {
+      harness.store.switchTo('s-b');
+      harness.render();
+      await harness.settle();
+      harness.store.switchTo('s-a');
+      harness.render();
+      await harness.settle();
+    }
+    // One initial apply plus one per return to A. An unbounded Set keyed only on
+    // session+route+document would have answered "already applied" on every
+    // return and left the count at 1.
+    expect(harness.bridge.applyPreview).toHaveBeenCalledTimes(6);
+  });
+
+  /**
+   * I6 — a v2 operation is refused with a reason on a v1 Bridge, not silently.
+   *
+   * Both the version mismatch and a malformed payload come back as a bare
+   * `rejected`, so without the negotiation the only symptom was a preview that
+   * never appeared with nothing to explain it.
+   */
+  it('I6: a v2 operation on a v1 bridge is refused with a version error', async () => {
+    const harness = mount(createStore([session('s-a')], 's-a'), createBridge());
+    harness.bridge.state.previewSchemaVersion = 1;
+    // The controller holds the `BridgeApi` object it was last rendered with, so
+    // the new capability has to reach it before anything is applied.
+    harness.render();
+    await applyClean(
+      harness,
+      completion({
+        candidate: candidate([{ target: 1, declarations: {}, text: 'clear' }]),
+      }),
+    );
+    expect(harness.bridge.applyPreview).not.toHaveBeenCalled();
+    expect(harness.store.session('s-a')?.previewTransactions[0]?.status).toBe('rejected');
+    expect(harness.store.session('s-a')?.previewTransactions[0]?.errorCode).toBe(
+      'bridge-preview-schema-too-old',
+    );
+  });
+
+  it('I7: a declarations-only transaction still applies on a v1 bridge', async () => {
+    const harness = mount(createStore([session('s-a')], 's-a'), createBridge());
+    harness.bridge.state.previewSchemaVersion = 1;
+    harness.render();
+    await applyClean(harness);
+    expect(harness.bridge.applyPreview).toHaveBeenCalledTimes(1);
+    expect(harness.transaction('a1')?.status).toBe('applied');
+  });
+
+  it('I8: a bridge that advertises no version at all is read as v1', async () => {
+    const harness = mount(createStore([session('s-a')], 's-a'), createBridge());
+    delete (harness.bridge.state as { previewSchemaVersion?: number }).previewSchemaVersion;
+    harness.render();
+    await applyClean(
+      harness,
+      completion({
+        candidate: candidate([{ target: 1, declarations: {}, element: 'hide' }]),
+      }),
+    );
+    expect(harness.bridge.applyPreview).not.toHaveBeenCalled();
+    expect(harness.store.session('s-a')?.previewTransactions[0]?.errorCode).toBe(
+      'bridge-preview-schema-too-old',
+    );
+  });
+
+  /**
+   * I9 — a transaction carries its producer.
+   */
+  it('I9: a chat-authored transaction records its producer', async () => {
+    const harness = mount(createStore([session('s-a')], 's-a'), createBridge());
+    await applyClean(harness);
+    expect(harness.transaction('a1')?.producer).toEqual({ kind: 'chat' });
   });
 });

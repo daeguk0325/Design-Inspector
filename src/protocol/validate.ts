@@ -46,9 +46,14 @@ export const PROTOCOL_LIMITS = Object.freeze({
   capabilityMaxImageBytes: 5_000_000,
   capabilityMaxImageDimension: 8_192,
   capabilityMaxImagePixels: 40_000_000,
-  capabilityPreviewChanges: 12,
+  // Must be >= the Bridge's PREVIEW_MAX_CHANGES, or every snapshot it sends
+  // fails validation and the App stops hearing from the target at all. This
+  // bound exists to reject a hostile or corrupt number, not to restate the
+  // product limit, so it is set well above the real one.
+  capabilityPreviewChanges: 256,
   capabilityPreviewProperties: 12,
   capabilityPreviewValueChars: 120,
+  capabilityPreviewSchemaVersion: 64,
   captureBase64Chars: 700_000,
   captureByteLength: 524_288,
   captureDimension: 1_600,
@@ -399,6 +404,14 @@ function isCapabilitiesValid(value: unknown): boolean {
   if (
     value['maxPreviewValueLength'] !== undefined &&
     !isBoundedInt(value['maxPreviewValueLength'], 0, L.capabilityPreviewValueChars)
+  ) {
+    return false;
+  }
+  // Optional so a Bridge older than the field still validates: absent means v1,
+  // and the App degrades rather than dropping the whole snapshot on the floor.
+  if (
+    value['previewSchemaVersion'] !== undefined &&
+    !isBoundedInt(value['previewSchemaVersion'], 0, L.capabilityPreviewSchemaVersion)
   ) {
     return false;
   }

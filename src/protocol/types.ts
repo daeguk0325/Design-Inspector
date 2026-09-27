@@ -16,6 +16,13 @@ export interface BridgeCapabilities {
   maxPreviewChanges?: number;
   maxPreviewPropertiesPerChange?: number;
   maxPreviewValueLength?: number;
+  /**
+   * The preview wire shape this Bridge understands. Absent on a Bridge that
+   * predates the field, which means v1 — the App must then avoid sending
+   * operations v1 has no way to express, and say why instead of reporting a
+   * bare rejection.
+   */
+  previewSchemaVersion?: number;
 }
 
 export type ConnectionStatus =

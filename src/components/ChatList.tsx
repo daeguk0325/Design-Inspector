@@ -13,6 +13,12 @@ export interface MessagePreviewStatus {
   enabled?: boolean;
   /** Kept for the shape the preview controller publishes; the row names the changes instead. */
   changeCount?: number;
+  /**
+   * Anchors that applied, when the transaction landed `partial`. Shown as a
+   * count because a 200-component theme that half applied is not a state the
+   * user can diagnose from "some of it worked".
+   */
+  appliedChanges?: number;
   errorCode?: string;
   /** Present once the message carries a proposal. Absent means it proposed nothing. */
   proposalState?: ProposalState;
@@ -134,6 +140,22 @@ function previewFailure(preview: MessagePreviewStatus): string | null {
 }
 
 /**
+ * A transaction that landed `partial` still has live mutations on the page, so it
+ * is not a failure and must not read like one — but the user is looking at a page
+ * that is only partly what they asked for, which is its own kind of problem and
+ * needs its own words. The count is the only thing that makes it actionable.
+ */
+function partialNote(preview: MessagePreviewStatus): string | null {
+  if (preview.status !== 'partial') return null;
+  const applied = preview.appliedChanges;
+  const total = preview.changeCount;
+  if (typeof applied !== 'number' || typeof total !== 'number' || total === 0) {
+    return 'Partly applied';
+  }
+  return `Partly applied (${applied}/${total})`;
+}
+
+/**
  * One row for a previewed answer: the change on the left, and the toggle that
  * keeps it or rolls it back on the right.
  *
@@ -153,9 +175,10 @@ function PreviewRow({
 }) {
   const lines = preview.summaryLines ?? [];
   const failure = previewFailure(preview);
+  const partial = partialNote(preview);
   // Nothing to keep and nothing to roll back: an answer that proposed no change
   // gets no row, rather than a toggle over an empty subject.
-  if (lines.length === 0 && failure === null) return null;
+  if (lines.length === 0 && failure === null && partial === null) return null;
   // An undecided proposal is already applied, so the toggle reads Accept until
   // the user says otherwise.
   const active: DesignDecision = message.decision ?? 'accepted';
@@ -170,6 +193,7 @@ function PreviewRow({
             </span>
           ))}
         </span>
+        {partial !== null && <span className="preview-partial">{partial}</span>}
         {failure !== null && <span className="preview-error">{failure}</span>}
       </span>
       {onDecision && (

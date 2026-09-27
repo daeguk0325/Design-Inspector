@@ -22,6 +22,11 @@ export const SCHEMA_VERSION = 2;
  *  live selections against the Bridge snapshot on focus/handshake (§15.4). */
 export const MULTI_TAB_POLICY = 'last-write-wins' as const;
 
+interface NormalizedShape {
+  shape: PersistedShape;
+  dropped: number;
+}
+
 interface Envelope {
   version: number;
   data: PersistedShape;
@@ -31,6 +36,15 @@ export interface LoadResult {
   shape: PersistedShape;
   migrated: boolean;
   recoveredFromCorruption: boolean;
+  /**
+   * Persisted preview transactions the strict parser rejected.
+   *
+   * The sanitizer discards rather than fails, so this is the only signal that a
+   * schema change made an older record unparseable and quietly shortened a
+   * session's history. Anything above zero is a bug in this file or in
+   * `transaction.ts`, not a thing to expect in normal use.
+   */
+  droppedPreviewTransactions: number;
 }
 
 export function emptyShape(): PersistedShape {
@@ -88,7 +102,12 @@ function normalizeMessage(raw: unknown): ChatMessage | null {
   return message;
 }
 
-function normalizeSession(raw: unknown, fromV1: boolean): InspectorSession | null {
+interface NormalizedSession {
+  session: InspectorSession;
+  droppedTransactions: number;
+}
+
+function normalizeSession(raw: unknown, fromV1: boolean): NormalizedSession | null {
   if (!isPlainObject(raw)) return null;
   const messages: ChatMessage[] = [];
   const rawMessages = raw['messages'];
@@ -98,26 +117,36 @@ function normalizeSession(raw: unknown, fromV1: boolean): InspectorSession | nul
       if (message !== null) messages.push(message);
     }
   }
+  const transactions = fromV1
+    ? { accepted: [], dropped: 0 }
+    : sanitizePreviewTransactions(raw['previewTransactions']);
   return {
-    id: asString(raw['id']),
-    title: asString(raw['title']),
-    targetUrl: asString(raw['targetUrl']),
-    model: asString(raw['model']),
-    messages,
-    previewTransactions: fromV1 ? [] : sanitizePreviewTransactions(raw['previewTransactions']),
-    persistedActiveSelectionIds: asStringArray(raw['persistedActiveSelectionIds']),
-    createdAt: asNumber(raw['createdAt']),
-    updatedAt: asNumber(raw['updatedAt']),
+    session: {
+      id: asString(raw['id']),
+      title: asString(raw['title']),
+      targetUrl: asString(raw['targetUrl']),
+      model: asString(raw['model']),
+      messages,
+      previewTransactions: transactions.accepted,
+      persistedActiveSelectionIds: asStringArray(raw['persistedActiveSelectionIds']),
+      createdAt: asNumber(raw['createdAt']),
+      updatedAt: asNumber(raw['updatedAt']),
+    },
+    droppedTransactions: transactions.dropped,
   };
 }
 
-function normalizeShape(raw: unknown, fromV1: boolean): PersistedShape {
+function normalizeShape(raw: unknown, fromV1: boolean): NormalizedShape {
   const sessions: InspectorSession[] = [];
+  let dropped = 0;
   const rawSessions = isPlainObject(raw) ? raw['sessions'] : undefined;
   if (Array.isArray(rawSessions)) {
     for (const item of rawSessions) {
-      const session = normalizeSession(item, fromV1);
-      if (session !== null) sessions.push(session);
+      const normalized = normalizeSession(item, fromV1);
+      if (normalized !== null) {
+        sessions.push(normalized.session);
+        dropped += normalized.droppedTransactions;
+      }
     }
   }
   const rawCurrent = isPlainObject(raw) ? raw['currentSessionId'] : undefined;
@@ -125,46 +154,67 @@ function normalizeShape(raw: unknown, fromV1: boolean): PersistedShape {
     typeof rawCurrent === 'string' && sessions.some((session) => session.id === rawCurrent)
       ? rawCurrent
       : (sessions[0]?.id ?? null);
-  return { sessions, currentSessionId };
+  return { shape: { sessions, currentSessionId }, dropped };
 }
 
 function isValidShape(s: unknown): s is PersistedShape {
   return isPlainObject(s) && Array.isArray(s['sessions']);
 }
 
-function migrate(old: unknown): PersistedShape {
+function migrate(old: unknown): NormalizedShape {
   return normalizeShape(old, true);
 }
+
+const EMPTY_LOAD: LoadResult = {
+  shape: { sessions: [], currentSessionId: null },
+  migrated: false,
+  recoveredFromCorruption: false,
+  droppedPreviewTransactions: 0,
+};
 
 export function loadPersisted(): LoadResult {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { shape: emptyShape(), migrated: false, recoveredFromCorruption: false };
+    if (!raw) return EMPTY_LOAD;
     const parsed = JSON.parse(raw) as unknown;
     if (isPlainObject(parsed) && 'version' in parsed && 'data' in parsed) {
       const version = parsed['version'];
       const data = parsed['data'];
       if (!isValidShape(data)) {
-        return { shape: emptyShape(), migrated: false, recoveredFromCorruption: true };
+        return { ...EMPTY_LOAD, recoveredFromCorruption: true };
       }
       if (version === SCHEMA_VERSION) {
+        const normalized = normalizeShape(data, false);
         return {
-          shape: normalizeShape(data, false),
+          shape: normalized.shape,
           migrated: false,
           recoveredFromCorruption: false,
+          droppedPreviewTransactions: normalized.dropped,
         };
       }
       if (typeof version === 'number' && version < SCHEMA_VERSION) {
-        return { shape: migrate(data), migrated: true, recoveredFromCorruption: false };
+        const migrated = migrate(data);
+        return {
+          shape: migrated.shape,
+          migrated: true,
+          recoveredFromCorruption: false,
+          droppedPreviewTransactions: migrated.dropped,
+        };
       }
-      return { shape: emptyShape(), migrated: false, recoveredFromCorruption: true };
+      return { ...EMPTY_LOAD, recoveredFromCorruption: true };
     }
     if (isValidShape(parsed)) {
-      return { shape: migrate(parsed), migrated: true, recoveredFromCorruption: false };
+      const migrated = migrate(parsed);
+      return {
+        shape: migrated.shape,
+        migrated: true,
+        recoveredFromCorruption: false,
+        droppedPreviewTransactions: migrated.dropped,
+      };
     }
-    return { shape: emptyShape(), migrated: false, recoveredFromCorruption: true };
+    return { ...EMPTY_LOAD, recoveredFromCorruption: true };
   } catch {
-    return { shape: emptyShape(), migrated: false, recoveredFromCorruption: true };
+    return { ...EMPTY_LOAD, recoveredFromCorruption: true };
   }
 }
 

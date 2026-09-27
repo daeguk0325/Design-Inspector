@@ -80,6 +80,17 @@ export interface BridgeApi {
   mode: InspectorMode;
   sessionBindingId: string | null;
   routeEpoch: number | null;
+  /**
+   * Bumped on every `resetSession`. The Bridge tears down every preview layer
+   * on reset without touching `routeEpoch`, so a consumer that keys "have I
+   * already applied this?" on session + route + document alone reconstructs an
+   * identical key after an A→B→A round trip and refuses to re-apply a layer the
+   * Bridge no longer holds.
+   *
+   * This is the same counter `scopeIsCurrent` checks first; it is exposed here
+   * only so the preview controller can put it in its own claim key.
+   */
+  bindingGeneration: number;
   iframeRef: React.RefObject<HTMLIFrameElement | null>;
   targetUrl: string;
   setTargetUrl: (u: string) => void;
@@ -1032,6 +1043,7 @@ export function useBridge(initialUrl: string): BridgeApi {
     mode,
     sessionBindingId,
     routeEpoch,
+    bindingGeneration: bindingGenerationRef.current,
     iframeRef,
     targetUrl,
     setTargetUrl,

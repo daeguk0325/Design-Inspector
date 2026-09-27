@@ -435,15 +435,37 @@ would have emitted a block on those three was not measured. The router is kept a
 cheap one-directional context, not claimed as an improvement to the gate.
 
 - `usePreviewController` turns one clean assistant completion into a single
-  atomic transaction. It resolves `selectorId` to a strong anchor, applies a
-  bridge-owned `<style>` layer through `VERA_INSPECTOR_PREVIEW_APPLY`, and only
-  reports success when the bridge confirms the layer. Each transaction persists
-  an `apply`/`undo`/`reset` state plus its decision.
+  atomic transaction. It resolves the rule's `target` — a citation display
+  number — to a strong anchor, applies a bridge-owned `<style>` layer through
+  `VERA_INSPECTOR_PREVIEW_APPLY`, and only reports success when the bridge
+  confirms the layer. Each transaction persists an `apply`/`undo`/`reset` state
+  plus its decision.
+- The bridge reports one status per transaction and calls it `rejected` when
+  *any* anchor fails, so the controller reads the per-anchor array instead: a
+  transaction that applied some anchors and not others is recorded as `partial`
+  and stays `enabled`. Collapsing the two once made a change the bridge was still
+  holding a live layer for get marked `rejected`, and therefore invisible to undo
+  (which returns early on a disabled transaction) and to reset (which filters on
+  `enabled`) — DOM mutations no control in the app could take back.
+- Two limits that were one aliased constant are now separate on purpose. A model
+  block is capped at 12 rules, because the sidecar discards the whole block when
+  any single rule is invalid. A transaction is capped at 256 anchors, because the
+  bridge holds at most 16 layers per binding and a whole-theme transaction is the
+  unit that has to fit in one layer.
+- The bridge advertises `previewSchemaVersion` in `capabilities`. A target tab
+  opened before an upgrade keeps the older bridge for the life of that page load,
+  and a v2 operation sent to a v1 bridge comes back as the same bare `rejected`
+  a malformed payload produces. The app reads the advertised version and refuses
+  a v2 operation with `bridge-preview-schema-too-old` rather than reporting a
+  failure the user cannot explain. Absent means v1.
 - Previews are runtime DOM mutations only. The inspected project's source files
   are never written, and there is no file-diff or apply-to-source path. Undo and
   Reset re-resolve the anchor and remove the layer; reload/route changes re-apply
-  through rebinding (§2). Auto preview is off by default and can be enabled in
-  Settings.
+  through rebinding (§2). **Auto preview is on by default** and can be turned off
+  in Settings (`store.ts` defaults `autoCssPreview` to `true`).
+
+See `docs/PREVIEW_INVARIANTS.md` for the full ledger, including the invariants
+that are currently violated.
 
 ## 7. Export (§19)
 

@@ -1,6 +1,5 @@
 import { validateDeclarations } from './cssPolicy.ts';
 import {
-  MAX_PREVIEW_RULES,
   MAX_PREVIEW_TARGET,
   MAX_PREVIEW_TEXT_CHARS,
   PREVIEW_ELEMENT_OPS,
@@ -11,6 +10,14 @@ import type { PreviewElementOp, PreviewTextOp } from './contract.ts';
 export type PreviewRuntimeStatus =
   | 'pending-rebind'
   | 'applied'
+  /**
+   * Some anchors applied and some did not. The Bridge reports one status for a
+   * whole transaction, so this is the App's name for the case the Bridge cannot
+   * express: a 10-rule transaction where 9 elements changed and one anchor no
+   * longer resolves. It stays `enabled`, because the Bridge is holding a live
+   * layer and both undo and reset have to be able to reach it.
+   */
+  | 'partial'
   | 'unbound'
   | 'ambiguous'
   | 'rejected'
@@ -21,9 +28,19 @@ export type PreviewRuntimeStatus =
 /** Accept keeps the applied change; Reject rolls it back. There is no third state. */
 export type DesignDecision = 'accepted' | 'rejected';
 
+/**
+ * What created a transaction. Optional on disk and defaulted on read, because
+ * requiring it would make every session persisted before this field existed fail
+ * the strict parser and be silently dropped — losing preview history rather than
+ * a feature. `themeId`/`presetId` are attributes of a `design` transaction, not
+ * producers of their own.
+ */
+export type PreviewProducer = { kind: 'chat' | 'design' };
+
 export const PREVIEW_RUNTIME_STATUSES: readonly PreviewRuntimeStatus[] = Object.freeze([
   'pending-rebind',
   'applied',
+  'partial',
   'unbound',
   'ambiguous',
   'rejected',
@@ -31,6 +48,14 @@ export const PREVIEW_RUNTIME_STATUSES: readonly PreviewRuntimeStatus[] = Object.
   'reset',
   'stale-binding',
 ]);
+
+export const PREVIEW_PRODUCER_KINDS: readonly PreviewProducer['kind'][] = Object.freeze([
+  'chat',
+  'design',
+]);
+
+/** The producer a transaction without a readable one is recorded as. */
+export const DEFAULT_PREVIEW_PRODUCER: PreviewProducer = Object.freeze({ kind: 'chat' });
 
 export const DESIGN_DECISIONS: readonly DesignDecision[] = Object.freeze([
   'accepted',
@@ -72,6 +97,10 @@ export interface PreviewTransaction {
   changes: PreviewChangeRecord[];
   enabled: boolean;
   status: PreviewRuntimeStatus;
+  /** Present on every transaction written after the field existed; read as `chat` when absent. */
+  producer?: PreviewProducer;
+  /** Anchors that applied, when the transaction landed `partial`. */
+  appliedChanges?: number;
   errorCode?: string;
   createdAt: number;
   updatedAt: number;
@@ -83,7 +112,24 @@ const MAX_URL_CHARS = 2_048;
 const MAX_PATH_CHARS = 1_024;
 const MAX_ERROR_CODE_CHARS = 64;
 const MAX_TIMESTAMP = 8_640_000_000_000_000;
-const MAX_TRANSACTION_CHANGES = MAX_PREVIEW_RULES;
+
+/**
+ * Anchors one transaction may carry.
+ *
+ * This used to be `MAX_PREVIEW_RULES` aliased, which conflated two limits that
+ * happen to both be 12. They are separate because they now disagree by design:
+ * a model-authored block stays capped small, because the sidecar discards the
+ * whole block when any single rule is invalid, so raising this would raise the
+ * loss surface of one bad rule twentyfold. A transaction, on the other hand, is
+ * also what a design theme is, and a theme is one atomic unit — capping it at 12
+ * forced a 200-component theme into 17 layers, past the Bridge's 16-layer
+ * per-binding budget, so it would have been trimmed away silently.
+ *
+ * Mirrors the Bridge's `PREVIEW_MAX_CHANGES`, which validates independently.
+ * The duplication between the two is the trust boundary, same as the CSS
+ * allowlists: `src/preview/cssPolicy.ts` says so for its own pair.
+ */
+export const MAX_TRANSACTION_CHANGES = 256;
 
 const ANCHOR_KEYS = new Set([
   'elementKey',
@@ -105,10 +151,13 @@ const TRANSACTION_KEYS = new Set([
   'changes',
   'enabled',
   'status',
+  'producer',
+  'appliedChanges',
   'errorCode',
   'createdAt',
   'updatedAt',
 ]);
+const PRODUCER_KEYS = new Set(['kind']);
 
 const STATUS_SET: ReadonlySet<string> = new Set(PREVIEW_RUNTIME_STATUSES);
 const DECISION_SET: ReadonlySet<string> = new Set(DESIGN_DECISIONS);
@@ -148,6 +197,30 @@ export const isPreviewRuntimeStatus = (value: unknown): value is PreviewRuntimeS
 
 export const isDesignDecision = (value: unknown): value is DesignDecision =>
   typeof value === 'string' && DECISION_SET.has(value);
+
+const PRODUCER_KIND_SET: ReadonlySet<string> = new Set(PREVIEW_PRODUCER_KINDS);
+
+/**
+ * A producer is read leniently on purpose.
+ *
+ * Every other field here is strict: a transaction with a bad one is dropped, and
+ * `sanitizePreviewTransactions` discards rather than failing. That is the right
+ * call for a corrupt anchor or a bad timestamp, but it is the wrong call here.
+ * The alternative — making `producer` a required key — routes every session
+ * persisted before the field existed through the strict parser, fails on the
+ * missing key, and deletes the user's entire preview history with no error and
+ * no migration counter.
+ *
+ * So an absent producer, or one that does not parse, is recorded as `chat`,
+ * which is what every existing transaction actually was. Keeping a transaction
+ * whose provenance is merely unknown beats losing it.
+ */
+export function parsePreviewProducer(raw: unknown): PreviewProducer {
+  if (!isPlainObject(raw) || !hasOnlyKeys(raw, PRODUCER_KEYS)) return DEFAULT_PREVIEW_PRODUCER;
+  const kind = raw['kind'];
+  if (typeof kind !== 'string' || !PRODUCER_KIND_SET.has(kind)) return DEFAULT_PREVIEW_PRODUCER;
+  return { kind: kind as PreviewProducer['kind'] };
+}
 
 export function parsePreviewAnchor(raw: unknown): PreviewAnchor | null {
   if (!isPlainObject(raw) || !hasOnlyKeys(raw, ANCHOR_KEYS)) return null;
@@ -252,19 +325,38 @@ export function parsePreviewTransaction(raw: unknown): PreviewTransaction | null
     changes,
     enabled,
     status,
+    producer: parsePreviewProducer(raw['producer']),
     createdAt,
     updatedAt,
   };
+  const appliedChanges = optInt(raw['appliedChanges'], 0, MAX_TRANSACTION_CHANGES, 0);
+  if (appliedChanges === null) return null;
+  if (raw['appliedChanges'] !== undefined) transaction.appliedChanges = appliedChanges;
   if (errorCode !== undefined) transaction.errorCode = errorCode;
   return transaction;
 }
 
-export function sanitizePreviewTransactions(input: unknown): PreviewTransaction[] {
-  if (!Array.isArray(input)) return [];
+export interface SanitizedTransactions {
+  accepted: PreviewTransaction[];
+  /** Items the strict parser rejected. Surfaced so silent history loss is visible. */
+  dropped: number;
+}
+
+/**
+ * Returns the accepted transactions *and* how many were dropped.
+ *
+ * The count matters because the alternative is invisible: a schema change that
+ * makes an older record unparseable does not fail the load, it just quietly
+ * shortens the session's history, and nothing anywhere says so.
+ */
+export function sanitizePreviewTransactions(input: unknown): SanitizedTransactions {
+  if (!Array.isArray(input)) return { accepted: [], dropped: 0 };
   const accepted: PreviewTransaction[] = [];
+  let dropped = 0;
   for (const item of input) {
     const transaction = parsePreviewTransaction(item);
     if (transaction !== null) accepted.push(transaction);
+    else dropped += 1;
   }
-  return accepted;
+  return { accepted, dropped };
 }

@@ -445,6 +445,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .preview-change + .preview-change::before { content: '·'; margin: 0 6px; color: var(--text-3); }
 .preview-error { font-weight: 650; }
 
+/* A partial transaction has live mutations, so it is not styled as a failure —
+   but the page is not what was asked for, so it cannot read as a clean row. */
+.preview-partial { color: var(--text-3); font-weight: 650; }
+
 .status-note { font-size: 12px; color: var(--text-3); }
 .status-note.err { color: var(--bad); }
 .status-live { display: inline-flex; align-items: center; gap: 6px; }

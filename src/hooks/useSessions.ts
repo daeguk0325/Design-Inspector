@@ -114,7 +114,21 @@ export function useSessions() {
           if (s.id !== id) return s;
           if (isMateriallyDifferentTarget(s.targetUrl, newUrl)) {
             // §14.4: materially different target invalidates live selection set.
-            return { ...s, targetUrl: newUrl, persistedActiveSelectionIds: [], updatedAt: Date.now() };
+            // Preview history is kept rather than deleted, but marked: a
+            // transaction authored against the old page must not be re-applied
+            // to the new one, and a row that says which binding it belongs to
+            // is more use than a row that silently stopped working.
+            return {
+              ...s,
+              targetUrl: newUrl,
+              persistedActiveSelectionIds: [],
+              previewTransactions: s.previewTransactions.map((t) =>
+                t.enabled
+                  ? { ...t, enabled: false, status: 'stale-binding' as const, updatedAt: Date.now() }
+                  : t,
+              ),
+              updatedAt: Date.now(),
+            };
           }
           return { ...s, targetUrl: newUrl, updatedAt: Date.now() };
         }),

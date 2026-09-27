@@ -4,10 +4,19 @@ import { latestUserRequest } from './models.ts';
 import type { ChatMessage, InspectorSession } from './models.ts';
 import { buildTransmissionPrompt } from '../ollama/client.ts';
 import {
+  MAX_TRANSACTION_CHANGES,
   parsePreviewTransaction,
   sanitizePreviewTransactions,
 } from '../preview/transaction.ts';
 import type { PreviewAnchor, PreviewTransaction } from '../preview/transaction.ts';
+import { MAX_PREVIEW_RULES } from '../preview/contract.ts';
+
+/**
+ * The sanitizer reports a drop count alongside what survived. Almost every case
+ * here is only about which records came back, so this keeps those assertions
+ * reading as before; the count itself is asserted separately.
+ */
+const sanitize = (input: unknown) => sanitizePreviewTransactions(input).accepted;
 
 const anchor: PreviewAnchor = {
   elementKey: 'button.save',
@@ -35,6 +44,9 @@ const validTransaction: PreviewTransaction = {
   ],
   enabled: true,
   status: 'applied',
+  // Absent on disk before this field existed; the parser materialises it, so the
+  // round-trip fixture carries the value it will be read back as.
+  producer: { kind: 'chat' as const },
   createdAt: 1_000,
   updatedAt: 2_000,
 };
@@ -155,7 +167,7 @@ describe('preview transaction validators', () => {
   });
 
   it('sanitizes a valid transaction to an equal value', () => {
-    expect(sanitizePreviewTransactions([validTransaction])).toEqual([validTransaction]);
+    expect(sanitize([validTransaction])).toEqual([validTransaction]);
   });
 
   it('drops invalid transactions individually and keeps valid ones', () => {
@@ -164,7 +176,7 @@ describe('preview transaction validators', () => {
       id: 'tx-2',
       status: 'pending-rebind',
     };
-    const result = sanitizePreviewTransactions([
+    const result = sanitize([
       validTransaction,
       { nope: true },
       second,
@@ -180,14 +192,14 @@ describe('preview transaction validators', () => {
       ...validTransaction,
       changes: [{ ...validTransaction.changes[0]!, base64: 'AAAABBBBCCCC' }],
     };
-    expect(sanitizePreviewTransactions([withBase64])).toEqual([]);
+    expect(sanitize([withBase64])).toEqual([]);
   });
 
   it('rejects style-text fields on a transaction', () => {
     expect(
-      sanitizePreviewTransactions([{ ...validTransaction, styleText: 'button{color:red}' }]),
+      sanitize([{ ...validTransaction, styleText: 'button{color:red}' }]),
     ).toEqual([]);
-    expect(sanitizePreviewTransactions([{ ...validTransaction, css: 'color:red' }])).toEqual([]);
+    expect(sanitize([{ ...validTransaction, css: 'color:red' }])).toEqual([]);
   });
 
   it('rejects anchors that are not html mode or miss identity fields', () => {
@@ -199,8 +211,8 @@ describe('preview transaction validators', () => {
       ...validTransaction,
       changes: [{ ...validTransaction.changes[0]!, anchor: { ...anchor, elementKey: '' } }],
     };
-    expect(sanitizePreviewTransactions([badMode])).toEqual([]);
-    expect(sanitizePreviewTransactions([missingKey])).toEqual([]);
+    expect(sanitize([badMode])).toEqual([]);
+    expect(sanitize([missingKey])).toEqual([]);
   });
 
   it('enforces citation number bounds', () => {
@@ -213,9 +225,9 @@ describe('preview transaction validators', () => {
       ...validTransaction,
       changes: [{ ...validTransaction.changes[0]!, target: 2.9 }],
     };
-    expect(sanitizePreviewTransactions([zero])).toEqual([]);
-    expect(sanitizePreviewTransactions([huge])).toEqual([]);
-    expect(sanitizePreviewTransactions([fractional])).toEqual([
+    expect(sanitize([zero])).toEqual([]);
+    expect(sanitize([huge])).toEqual([]);
+    expect(sanitize([fractional])).toEqual([
       { ...validTransaction, changes: [{ ...validTransaction.changes[0]!, target: 2 }] },
     ]);
   });
@@ -239,35 +251,101 @@ describe('preview transaction validators', () => {
         },
       ],
     };
-    expect(sanitizePreviewTransactions([badDeclaration])).toEqual([]);
-    expect(sanitizePreviewTransactions([longElementKey])).toEqual([]);
+    expect(sanitize([badDeclaration])).toEqual([]);
+    expect(sanitize([longElementKey])).toEqual([]);
   });
 
   it('rejects unknown runtime statuses and non-boolean enabled flags', () => {
     expect(
-      sanitizePreviewTransactions([{ ...validTransaction, status: 'live' as 'applied' }]),
+      sanitize([{ ...validTransaction, status: 'live' as 'applied' }]),
     ).toEqual([]);
     expect(
-      sanitizePreviewTransactions([{ ...validTransaction, enabled: 'yes' as unknown as boolean }]),
+      sanitize([{ ...validTransaction, enabled: 'yes' as unknown as boolean }]),
     ).toEqual([]);
   });
 
   it('requires transaction identity fields', () => {
-    expect(sanitizePreviewTransactions([{ ...validTransaction, id: '' }])).toEqual([]);
-    expect(sanitizePreviewTransactions([{ ...validTransaction, assistantId: undefined }])).toEqual([]);
-    expect(sanitizePreviewTransactions([{ ...validTransaction, sessionId: 42 }])).toEqual([]);
+    expect(sanitize([{ ...validTransaction, id: '' }])).toEqual([]);
+    expect(sanitize([{ ...validTransaction, assistantId: undefined }])).toEqual([]);
+    expect(sanitize([{ ...validTransaction, sessionId: 42 }])).toEqual([]);
   });
 
   it('rejects negative timestamps and keeps a valid errorCode', () => {
-    expect(sanitizePreviewTransactions([{ ...validTransaction, createdAt: -1 }])).toEqual([]);
-    expect(sanitizePreviewTransactions([{ ...validTransaction, errorCode: 'anchor-missing' }])).toEqual([
+    expect(sanitize([{ ...validTransaction, createdAt: -1 }])).toEqual([]);
+    expect(sanitize([{ ...validTransaction, errorCode: 'anchor-missing' }])).toEqual([
       { ...validTransaction, errorCode: 'anchor-missing' },
     ]);
   });
 
   it('returns an empty array for non-array input', () => {
-    expect(sanitizePreviewTransactions(undefined)).toEqual([]);
-    expect(sanitizePreviewTransactions('nope')).toEqual([]);
-    expect(sanitizePreviewTransactions({})).toEqual([]);
+    expect(sanitize(undefined)).toEqual([]);
+    expect(sanitize('nope')).toEqual([]);
+    expect(sanitize({})).toEqual([]);
+  });
+
+  /**
+   * Producer provenance is read leniently, and this is the reason.
+   *
+   * Every other field here is strict, and the sanitizer discards rather than
+   * fails. Requiring `producer` would therefore route every session persisted
+   * before the field existed through this parser, fail on the missing key, and
+   * delete the user's preview history with no error and no migration counter.
+   */
+  it('I10: a transaction with no producer loads as chat, keeping its history', () => {
+    const { producer: _omitted, ...withoutProducer } = validTransaction;
+    const [loaded] = sanitize([withoutProducer]);
+    expect(loaded?.producer).toEqual({ kind: 'chat' });
+    expect(sanitize([withoutProducer])).toHaveLength(1);
+  });
+
+  it('I11: a malformed producer falls back to chat rather than dropping the record', () => {
+    for (const producer of [{ kind: 'theme' }, { kind: 7 }, {}, { kind: 'design', extra: 1 }, 'chat']) {
+      const [loaded] = sanitize([{ ...validTransaction, producer }]);
+      expect(loaded).toBeDefined();
+      expect(loaded?.producer).toEqual({ kind: 'chat' });
+    }
+  });
+
+  it('I11b: a design producer round-trips', () => {
+    const [loaded] = sanitize([{ ...validTransaction, producer: { kind: 'design' } }]);
+    expect(loaded?.producer).toEqual({ kind: 'design' });
+  });
+
+  it('I12: the sanitizer reports how many records it dropped', () => {
+    const result = sanitizePreviewTransactions([
+      validTransaction,
+      { nope: true },
+      { ...validTransaction, id: '' },
+      validTransaction,
+    ]);
+    expect(result.accepted).toHaveLength(2);
+    expect(result.dropped).toBe(2);
+  });
+
+  /**
+   * I13 — the transaction cap and the model-block cap are separate numbers.
+   *
+   * They were one aliased constant at 12. They now disagree on purpose: a model
+   * block stays small because the sidecar discards the whole block when any one
+   * rule is invalid, while a transaction has to be big enough to hold a whole
+   * design theme, because the Bridge caps layers per binding at 16 and a
+   * 200-component theme split into 12-change transactions would need 17 of them.
+   */
+  it('I13: a transaction holds far more changes than a model block may carry', () => {
+    expect(MAX_TRANSACTION_CHANGES).toBeGreaterThan(MAX_PREVIEW_RULES * 10);
+
+    const many = Array.from({ length: MAX_TRANSACTION_CHANGES }, (_, index) => ({
+      ...validTransaction.changes[0]!,
+      target: index + 1,
+    }));
+    expect(sanitize([{ ...validTransaction, changes: many }])).toHaveLength(1);
+  });
+
+  it('I13b: a transaction over the cap is rejected', () => {
+    const tooMany = Array.from({ length: MAX_TRANSACTION_CHANGES + 1 }, (_, index) => ({
+      ...validTransaction.changes[0]!,
+      target: index + 1,
+    }));
+    expect(sanitize([{ ...validTransaction, changes: tooMany }])).toEqual([]);
   });
 });

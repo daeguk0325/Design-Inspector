@@ -300,12 +300,16 @@ describe('handshake payload validation', () => {
     };
     for (const capabilities of [
       { ...base, cssPreview: 'yes' },
-      { ...base, maxPreviewChanges: 13 },
+      // 257 is past the validator's ceiling; 256 is the real limit and must pass.
+      { ...base, maxPreviewChanges: 257 },
       { ...base, maxPreviewChanges: -1 },
       { ...base, maxPreviewChanges: 1.5 },
       { ...base, maxPreviewPropertiesPerChange: 0x7fffffff },
       { ...base, maxPreviewValueLength: 121 },
       { ...base, maxPreviewValueLength: '120' },
+      { ...base, previewSchemaVersion: '2' },
+      { ...base, previewSchemaVersion: 1.5 },
+      { ...base, previewSchemaVersion: 65 },
       { ...base, maxSelectionImages: 17 },
       { ...base, maxImageBytes: 5_000_001 },
       { ...base, selectionCrop: 1 },
