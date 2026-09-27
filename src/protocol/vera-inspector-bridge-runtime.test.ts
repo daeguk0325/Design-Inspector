@@ -416,7 +416,15 @@ describe('session reset', () => {
 
     const acks = harness.typed('VERA_INSPECTOR_SESSION_RESET_ACK').filter((message) => message.requestId === requestId);
     expect(acks).toHaveLength(1);
-    expect(acks[0]?.payload).toMatchObject({ routeKey: '/', routeEpoch: 0 });
+    // The epoch advances. It used to be asserted as 0, which is what let a
+    // `PREVIEW_APPLY` issued under the previous binding resolve normally after
+    // the reset: the app cancels on `pending.epoch < nextEpoch` and rejects a
+    // changed epoch, and with an unchanged epoch neither guard fired, so the app
+    // recorded `applied` for a layer this reset had just destroyed. The route did
+    // not move, which is exactly why reusing the counter is safe.
+    expect(acks[0]?.payload).toMatchObject({ routeKey: '/' });
+    const resetEpoch = acks[0]?.payload['routeEpoch'] as number;
+    expect(resetEpoch).toBeGreaterThan(0);
     const snapshots = harness
       .typed('VERA_INSPECTOR_SNAPSHOT')
       .filter((message) => message.requestId === requestId);
@@ -1470,6 +1478,70 @@ describe('preview v2 text and element operations', () => {
     expect(domShape(target)).toBe(before);
     expect(target.textContent).toBe('Original copy');
     expect(harness.contractFailures()).toEqual([]);
+  });
+
+  /**
+   * I14 — an undo restores the original Text node, not a copy of its characters.
+   *
+   * `domShape` equality already passed while the restore used
+   * `document.createTextNode`, because a fresh node with the same text is
+   * indistinguishable once it is in the tree. What it cannot see is every
+   * reference the page was holding: a framework's internal node, a
+   * `NodeIterator`, an application variable. Those were all left pointing at a
+   * detached orphan after an undo.
+   */
+  it('I14: undo puts the original text node back, not an equal copy', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('identity-target', ['keep me']);
+    const originalNode = target.childNodes[0] as Text;
+    expect(originalNode.nodeType).toBe(3);
+
+    harness.apply('bind-1', 'tx-identity', [
+      { anchor: testIdAnchor('identity-target'), declarations: {}, text: 'clear' },
+    ]);
+    expect(target.contains(originalNode)).toBe(false);
+    expect(target.textContent).toBe('');
+
+    harness.undo('bind-1', 'tx-identity');
+    expect(target.childNodes[0]).toBe(originalNode);
+    expect(target.contains(originalNode)).toBe(true);
+    expect(originalNode.data).toBe('keep me');
+  });
+
+  it('I14b: the page editing the detached node does not survive the undo', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('edited-target', ['original words']);
+    const originalNode = target.childNodes[0] as Text;
+
+    harness.apply('bind-1', 'tx-edited', [
+      { anchor: testIdAnchor('edited-target'), declarations: {}, text: 'clear' },
+    ]);
+    // A script that kept the reference writes to it while it is detached.
+    originalNode.data = 'mutated while gone';
+
+    harness.undo('bind-1', 'tx-edited');
+    // The user asked for the original back, not for an edit made to a node the
+    // page could not see to survive an undo.
+    expect(target.textContent).toBe('original words');
+    expect(target.childNodes[0]).toBe(originalNode);
+  });
+
+  it('I14c: an element-op undo also keeps identity, matching the text path', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('remove-identity', ['gone soon']);
+    expect(target.isConnected).toBe(true);
+
+    harness.apply('bind-1', 'tx-remove-identity', [
+      { anchor: testIdAnchor('remove-identity'), declarations: {}, element: 'remove' },
+    ]);
+    expect(target.isConnected).toBe(false);
+
+    harness.undo('bind-1', 'tx-remove-identity');
+    expect(target.isConnected).toBe(true);
+    expect(document.body.contains(target)).toBe(true);
   });
 
   it('replaces text around a child element and rebuilds the exact original run', () => {

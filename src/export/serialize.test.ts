@@ -123,3 +123,99 @@ describe('style facts stay out of the agent export', () => {
     expect(out).not.toContain('styleFacts');
   });
 });
+
+/**
+ * I18 — the export discloses live, unexported preview state.
+ *
+ * The output used to be byte-identical whether zero or five previews were
+ * applied and undecided. An agent handed that text rebuilds the page as it was
+ * before the preview, and nothing in it says the page the user is looking at is
+ * different. That is the one place a runtime-only mutation has to be named,
+ * because the whole system otherwise depends on the user not needing to say it.
+ */
+describe('buildAgentPrompt live preview disclosure', () => {
+  function withPreview(status: string, enabled: boolean): InspectorSession {
+    const base = sessionWith({ userTexts: ['make it blue'] });
+    return {
+      ...base,
+      previewTransactions: [
+        {
+          id: 'pv-1',
+          assistantId: 'a1',
+          userMessageId: 'm0',
+          sessionId: 's1',
+          targetUrl: base.targetUrl,
+          routeKey: '/',
+          changes: [
+            {
+              target: 1,
+              anchor: {
+                elementKey: 'html:testid:save',
+                routeKey: '/',
+                mode: 'html' as const,
+                tagName: 'button',
+                id: '',
+                testId: 'save',
+                path: '/',
+              },
+              declarations: { color: 'rgb(0, 0, 255)' },
+            },
+          ],
+          enabled,
+          status: status as InspectorSession['previewTransactions'][number]['status'],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+    };
+  }
+
+  it('says so, and names the element and the change, when a preview is live', () => {
+    const out = buildAgentPrompt({ session: withPreview('applied', true), active: [] });
+    expect(out).toContain('## Live preview');
+    expect(out).toContain('html:testid:save');
+    expect(out).toContain('color: rgb(0, 0, 255)');
+    // It has to say the mutations are not in the source, or the agent will
+    // implement the request above and call the page correct.
+    expect(out).toContain('not in the target project');
+  });
+
+  it('distinguishes a design-produced transaction from a chat one', () => {
+    const base = withPreview('applied', true);
+    const design = {
+      ...base,
+      previewTransactions: [
+        { ...base.previewTransactions[0]!, producer: { kind: 'design' as const } },
+      ],
+    };
+    expect(buildAgentPrompt({ session: design, active: [] })).toContain('design');
+    expect(buildAgentPrompt({ session: base, active: [] })).toContain('chat');
+  });
+
+  it('names a partial application with its count rather than implying completeness', () => {
+    const base = withPreview('partial', true);
+    const two = { ...base.previewTransactions[0]!, changes: [...base.previewTransactions[0]!.changes, ...base.previewTransactions[0]!.changes] };
+    const out = buildAgentPrompt({ session: { ...base, previewTransactions: [{ ...two, appliedChanges: 1 }] }, active: [] });
+    expect(out).toContain('partial');
+  });
+
+  for (const [status, enabled] of [
+    ['undone', false],
+    ['reset', false],
+    ['rejected', false],
+    ['stale-binding', false],
+    ['applied', false],
+  ] as const) {
+    it(`stays silent for ${status} with enabled=${enabled}`, () => {
+      const out = buildAgentPrompt({ session: withPreview(status, enabled), active: [] });
+      expect(out).not.toContain('## Live preview');
+    });
+  }
+
+  it('leaves a clean session byte-identical to before', () => {
+    const out = buildAgentPrompt({ session: sessionWith({ userTexts: ['request'] }), active: [] });
+    expect(out).not.toContain('Live preview');
+    expect(out.endsWith('\n')).toBe(true);
+    expect(out.endsWith('\n\n')).toBe(false);
+  });
+});

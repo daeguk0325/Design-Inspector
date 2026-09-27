@@ -474,6 +474,20 @@ deduped reconciled active (first-added order) + a fixed template, `\n` endings,
 exactly one trailing newline. No AI call.
 `buildRawTranscript` is the separate untransformed export.
 
+When the session holds **live** preview transactions, the prompt also carries a
+`## Live preview — NOT described above` section naming each transaction's
+producer, status, `elementKey`s and operations, and stating that the mutations are
+not in the target project's source. Live means `enabled` **and** a status that
+puts it on the page (`applied`, `partial`, `unbound`, `ambiguous`,
+`pending-rebind`); `undone`, `reset`, `rejected` and `stale-binding` are silent,
+and a session with nothing live is byte-identical to before.
+
+This is the one place a runtime-only mutation has to be named. The change log is
+a separate surface, so without it an agent handed the clipboard rebuilds the page
+as it was *before* the preview with nothing in the text saying the page the user
+is looking at is different. `producer` is what made it decidable rather than a
+blanket warning.
+
 Pin-based constraints are gone. The accepted change log is the durable record of
 what was decided, and it is exported through the change-log panel and the
 proposal document instead (§9f).

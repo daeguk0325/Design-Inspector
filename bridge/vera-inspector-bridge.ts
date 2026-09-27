@@ -1630,6 +1630,21 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
     nextSibling: Node | null;
     prevSibling: Node | null;
     data: string;
+    /**
+     * The original node, kept by reference.
+     *
+     * Restoring used to `document.createTextNode(record.data)` and insert the
+     * copy, which means everything that held the original — a framework's
+     * internal reference, a `NodeIterator`, an application variable — was left
+     * pointing at a detached orphan after the undo. `element: "remove"` already
+     * restores its element by reference, so this was an asymmetry rather than a
+     * constraint: the node is in hand at the moment it is detached, and holding
+     * it costs one field.
+     *
+     * `data` stays as a cross-check, not as the restore source: if the page
+     * edited the detached node we still want the recorded text back.
+     */
+    node: Text;
   }
 
   interface PreviewLayer {
@@ -2781,7 +2796,13 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
           previousParent = null;
           continue;
         }
-        const text = document.createTextNode(record.data);
+        // The original node, not a copy of its text. The node was detached from
+        // this exact parent moments ago, so re-inserting it is both the more
+        // precise restore and the cheaper one. If the page mutated it while it
+        // was detached, the recorded text wins — the user asked for the original
+        // to come back, not for the page's edit to survive an undo.
+        const text = record.node;
+        if (text.data !== record.data) text.data = record.data;
         const sibling = record.nextSibling;
         if (sibling !== null && sibling.parentNode === record.parent) {
           record.parent.insertBefore(text, sibling);
@@ -2996,7 +3017,13 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
       try {
         planned.push({
           node,
-          record: { parent: element, nextSibling, prevSibling: node.previousSibling, data: node.data },
+          record: {
+            parent: element,
+            nextSibling,
+            prevSibling: node.previousSibling,
+            data: node.data,
+            node,
+          },
         });
       } catch {
         return null;
@@ -3374,6 +3401,15 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
     );
   }
   function handleSessionReset(requestId: string): void {
+    // The epoch has to move, or the reset is invisible to work already in
+    // flight. A `PREVIEW_APPLY` issued under the previous binding resolves
+    // normally after this, and the App records `applied` for a layer that
+    // `clearLiveRuntimeState` has just destroyed — so the session claims a
+    // change is on a page it is not on. The App cancels on
+    // `pending.epoch < nextEpoch` and rejects on a changed epoch, so both
+    // guards start working again from here. The route did not change, which is
+    // precisely why reusing the counter is safe: nothing about the page moved.
+    routeEpoch += 1;
     clearLiveRuntimeState();
     if (bridgeDestroyed) return;
     send('VERA_INSPECTOR_SESSION_RESET_ACK', { routeKey, routeEpoch }, requestId);

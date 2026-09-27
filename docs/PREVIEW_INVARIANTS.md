@@ -24,51 +24,31 @@ to the user, and the Design Engine is not allowed to make any of them worse.
 | I11 | A malformed `producer` falls back to `chat` rather than dropping the record | held | `models.test.ts` "I11", "I11b" |
 | I12 | A load that dropped persisted transactions says so | held | `store.test.ts` "I12", "I12b", "I12c" |
 | I13 | The transaction cap and the model-block cap are separate numbers | held | `models.test.ts` "I13", "I13b" |
-| **I14** | **Undoing a `text`/`replaceText` operation restores the original Text node's identity, not a copy** | **open** | — |
-| **I15** | **A session reset cancels a preview that is already in flight** | **open** | — |
+| I14 | Undoing a `text`/`replaceText` operation restores the original Text node's identity, not a copy | held | `vera-inspector-bridge-runtime.test.ts` "I14", "I14b", "I14c" |
+| I15 | A session reset cancels a preview that is already in flight | held | `vera-inspector-bridge-runtime.test.ts` "session reset … returns a fresh snapshot" |
 | **I16** | **The App learns when the Bridge trims a layer, instead of the record silently claiming `applied`** | **open** | — |
 | **I17** | **CSS precedence between two layers is deterministic after the specificity ladder saturates** | **open** | — |
-| **I18** | **"Copy for Agent" reflects live, unexported preview state** | **open** | — |
+| I18 | "Copy for Agent" reflects live, unexported preview state | held | `serialize.test.ts` "buildAgentPrompt live preview disclosure" (9 cases) |
 | **I19** | **A shadow-DOM component reports `unbound` distinguishably from one that genuinely has no match** | **open** | — |
 | **I20** | **A CSP that blocks the preview stylesheet is reported, not reported as `applied`** | **open** | — |
 
 ## Why the open ones matter before a Design Engine exists
 
-**I14 — text node identity.** `replayPreviewTextRestores` calls
-`document.createTextNode(record.data)` and re-inserts a *new* node. `element:
-"remove"` restores the original element by reference, so the asymmetry is
-specific to text. Anything holding the original node — a framework's internal
-reference, a `NodeIterator`, an app variable — is left pointing at a detached
-orphan. A design system that re-lays out text will hit this; nothing in a
-restyle-only pass ever does.
-
-**I15 — in-flight applies survive a session reset.** `routeEpoch` is incremented
-in exactly one place, `syncRoute`, and `handleSessionReset` never calls it, so a
-reset re-sends the *unchanged* epoch. `dropStalePreviews` filters on
-`pending.routeEpoch < nextEpoch`, strictly, so nothing is cancelled. A
-`PREVIEW_APPLY` issued before the reset still resolves, and the App records
-`applied` for a layer the reset already destroyed. This is precisely the class
-`dropStalePreviews` exists to prevent; the epoch is the wrong instrument for a
-session reset.
-
 **I16 — silent trim.** `trimPreviewLayers` evicts the oldest layer past 16 per
 binding or 128 globally and sends nothing. The evicted transaction keeps
 `status: 'applied'`, so `undo` returns `no-op` for a change the page never had.
-The per-binding budget is now enforced App-side, which is what makes the condition
-unreachable for chat traffic — but nothing prevents a single transaction from
-pushing a binding over 16 layers, and the App cannot see the layer count at all.
+The per-binding budget is now enforced App-side, and a design theme is one
+transaction rather than seventeen, so 16 layers means 16 design decisions — not
+reachable in normal use. It stays open because nothing *prevents* a single
+session from stacking past 16, and the App cannot see the layer count at all:
+`previewLayerCount` exists only on the in-process `getState()`.
 
 **I17 — specificity saturation.** `specificity = min(3 + previewOrdinal, 12)`,
-and `previewOrdinal` is never reset. After roughly nine applies every layer
-sits at 12 and precedence falls out of `<style>` tree order instead. A theme
-applied as a transaction stack will cross that threshold in normal use.
-
-**I18 — export silence.** `buildAgentPrompt` never reads `previewTransactions`,
-so its output is byte-identical whether zero or five previews are live and
-undecided, and `handleCopyAgent` has no guard on preview state. The agent is
-handed a page description that silently omits what the user is looking at.
-`producer` is what makes this decidable: without it there is no way to ask
-"which live changes would not be in this export".
+and `previewOrdinal` is never reset, so after roughly nine applies every layer
+sits at 12 and precedence falls out of `<style>` tree order instead. With 16
+layers per binding this threshold is inside the reachable range. It is benign
+today because `createStyleLayer` appends to `document.head`, so the newest layer
+does win — by tree order, not by the mechanism that was supposed to decide it.
 
 **I19 — shadow DOM.** `buildPreviewIndex` uses `document.querySelectorAll('*')`,
 which does not pierce shadow roots, and the App has no signal distinguishing
@@ -78,6 +58,39 @@ which does not pierce shadow roots, and the App has no signal distinguishing
 `<style nonce>`; a policy that blocks either produces no exception. The Bridge
 reports `applied`, the App records `applied`, and the page is mutated — marks are
 set regardless — while nothing renders.
+
+## Closed since the first draft, and how
+
+**I14 — text node identity.** `replayPreviewTextRestores` used to
+`document.createTextNode(record.data)` and insert the copy, so everything the
+page held — a framework's internal reference, a `NodeIterator`, an application
+variable — was left pointing at a detached orphan. The fix is one field:
+`PreviewTextRestore` now carries the original `node`, which was in hand at the
+moment it was detached. `data` is kept as a cross-check, so an edit the page made
+to the detached node does not survive the undo. `element: "remove"` already
+restored by reference, so this was an asymmetry rather than a constraint.
+
+*Verified to have teeth:* reverting the one line makes "I14" and "I14b" fail
+while the existing `domShape` assertions keep passing — which is the point, since
+a fresh node with equal text is indistinguishable once it is in the tree.
+
+**I15 — in-flight applies surviving a session reset.** `routeEpoch` is
+incremented in exactly one place, `syncRoute`, and `handleSessionReset` never
+touched it, so a reset re-sent the *unchanged* epoch. `dropStalePreviews` filters
+on `pending.routeEpoch < nextEpoch`, strictly, so nothing was cancelled. The
+Bridge now increments the epoch in `handleSessionReset`; the App needed no
+change, because it already called `dropStalePreviews` and `adoptRouteEpoch` on
+the ack. The route has not moved, which is exactly why reusing the counter is
+safe. The test that asserted `routeEpoch: 0` on a reset was encoding this bug,
+the same way `controller.test.tsx` encoded the claimScope one.
+
+**I18 — export silence.** `buildAgentPrompt` now emits a
+`## Live preview — NOT described above` section when the session has live,
+unexported transactions, listing the producer, the status, the `elementKey`s and
+the operations, and saying the mutations are not in the target's source. It
+filters on `enabled` *and* status, so `undone`, `reset`, `rejected` and
+`stale-binding` stay silent, and a session with no live preview is byte-identical
+to before. `producer` is what made this decidable rather than a blanket warning.
 
 ## Limits, and why they are duplicated rather than negotiated
 
