@@ -4,13 +4,17 @@
  * The product is a preview-first editor: a model answer that carries a preview
  * block is a *proposal*, and it stays provisional until the user decides.
  *
- *   applied + undecided        -> pending  (the next send settles it as rejected)
- *   user pressed Accept        -> accepted (preview stays applied)
- *   user pressed Reject        -> rejected (preview is rolled back)
+ *   applied + undecided        -> pending  (the change stays on the page)
+ *   user pressed Accept        -> accepted (the change stays applied)
+ *   user pressed Reject        -> rejected (the change is rolled back)
  *
- * Every applied change is therefore opt-in. Sending the next message is itself
- * a decision, and the design says an undecided proposal is not a decision the
- * user meant to keep.
+ * A decision is reversible, in both directions and any number of times. The
+ * user decides by looking at the page, so flipping back to Accept puts the
+ * change back on the page rather than only recording the word.
+ *
+ * Sending the next message is not a decision. A pending proposal stays pending
+ * across as many turns as it takes, and the next request carries it as pending
+ * so the model knows the change is live but unconfirmed.
  *
  * This module is pure: it derives the state from the session and formats lines
  * for the prompt, the change-log panel and the proposal document. Nothing here
@@ -141,31 +145,60 @@ export function proposalSummaryLines(proposal: Proposal): string[] {
 /**
  * The concise decision block the next request carries.
  *
- * A rejected proposal stays in the log on purpose: it tells the model which
- * direction the user already turned down, so it does not re-propose it.
+ * A pending proposal is in the block on purpose: its change is on the live page
+ * right now, and a model that cannot see that will either describe the old
+ * value as current or propose the same change again. It is marked as pending
+ * rather than accepted, so the model treats it as the page's state and not as
+ * agreed work.
+ *
+ * A rejected proposal stays in the list for the same reason it always did: it
+ * tells the model which direction the user already turned down.
+ *
+ * Pending lines are emitted first. The cap below is what bounds this block and
+ * it drops the tail, so the live-but-unconfirmed state has to be in the part
+ * that survives the cap rather than the part that gets cut.
  */
 export function decisionContextLines(
   messages: readonly ChatMessage[],
   transactions: readonly PreviewTransaction[],
 ): string[] {
   const lines: string[] = [];
-  for (const proposal of proposalsIn(messages, transactions)) {
-    if (proposal.state === 'pending') continue;
-    const tag = proposal.state === 'accepted' ? 'accept' : 'reject';
+  const append = (proposal: Proposal): boolean => {
     for (const summary of proposalSummaryLines(proposal)) {
-      if (lines.length >= MAX_DECISION_LINES) return lines;
-      lines.push(
-        proposal.state === 'rejected' ? `- [${tag}] ${summary} — reverted` : `- [${tag}] ${summary}`,
-      );
+      if (lines.length >= MAX_DECISION_LINES) return false;
+      lines.push(decisionLine(proposal, summary));
     }
+    return true;
+  };
+  const proposals = proposalsIn(messages, transactions);
+  for (const proposal of proposals) {
+    if (proposal.state !== 'pending') continue;
+    if (!append(proposal)) return lines;
+  }
+  for (const proposal of proposals) {
+    if (proposal.state === 'pending') continue;
+    if (!append(proposal)) return lines;
   }
   return lines;
 }
 
+function decisionLine(proposal: Proposal, summary: string): string {
+  if (proposal.state === 'accepted') return `- [accept] ${summary}`;
+  if (proposal.state === 'rejected') return `- [reject] ${summary} — reverted`;
+  return `- [pending] ${summary} — applied now, not confirmed`;
+}
+
 /**
- * Every settled change, newest last, with the measured value it replaced.
+ * Every accepted change, in session order, with the measured value it replaced.
  * The panel and the proposal document are both rendered from this so they can
  * never disagree.
+ *
+ * Pending is deliberately left out. The change log and the document both state
+ * their values as work that was accepted, and a proposal the user has not
+ * decided is not that: putting it here would make an unconfirmed change read as
+ * confirmed in the artifact someone will implement from. Pending has to be
+ * reported somewhere that can also say it is unconfirmed, which is the decision
+ * context, and the panel already counts it separately.
  */
 export function buildChangeLog(
   messages: readonly ChatMessage[],

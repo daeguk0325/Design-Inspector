@@ -276,13 +276,68 @@ end the stream cleanly and both used to reach the user as a stub.
 ## 6b. Structured CSS preview (auto, runtime only)
 
 - The English system role asks the model to append exactly one fenced block
-  tagged `design-inspector-preview` containing a JSON array of
-  `{ selectorId, declarations }`. The visible answer remains Korean; the block
-  is stripped before rendering.
+  tagged `design-inspector-preview` containing a versioned rules array. The
+  visible answer remains Korean; the block is stripped before rendering.
 - Streaming sidecar parsing buffers split tokens, tolerates truncation, and
   only yields a payload for a strictly valid, schema-conformant, allow-listed
-  JSON array (`src/preview/sidecar.ts`, `src/preview/cssPolicy.ts`). Invalid,
+  block (`src/preview/sidecar.ts`, `src/preview/cssPolicy.ts`). Invalid,
   oversized, truncated, or errored responses simply produce no preview.
+
+### Schema v2: operations, not only declarations
+
+v1 could only say *"set this property to this value"*, which made three ordinary
+requests inexpressible: remove the text, change the text, and take a component out
+of the page. The model had no way to answer those except to pretend. What it
+reached for instead was `color: transparent` or `font-size: 0` — hiding, not
+removing, and the element still occupies its box. Observed on a real 9B: asked to
+remove the text of three font-only components, it dumped the component facts and
+changed nothing.
+
+A rule is now flat, with verb-named keys rather than a tagged union, because a
+weak model handles one obvious key per intent better than a nested object:
+
+```json
+{"version":2,"rules":[
+  {"target":1,"declarations":{"border-radius":"10px"}},
+  {"target":2,"text":"clear"},
+  {"target":3,"replaceText":"Sold out"},
+  {"target":4,"element":"hide"}
+]}
+```
+
+| key            | effect                                                        |
+| -------------- | ------------------------------------------------------------- |
+| `declarations` | CSS property/value pairs, allow-listed exactly as in v1        |
+| `text`         | `"clear"` — removes the element's own text nodes               |
+| `replaceText`  | replaces the element's own text (≤200 chars)                   |
+| `element`      | `"hide"` takes it out of the render, `"remove"` out of the DOM  |
+
+A rule must carry at least one operation, `text` and `replaceText` are mutually
+exclusive, and two rules may not target the same element. `declarations` is
+normalised to always be present, so nothing downstream special-cases the empty
+case. v1 blocks still parse, so a session persisted before the upgrade keeps
+working.
+
+`display` and `visibility` remain forbidden inside `declarations`, and were not
+added. The denylist exists to stop a weak model inventing `display:none` in a
+free-form map; a deliberate `element` operation is a different thing, and
+`element: "hide"` is the only way to hide a component.
+
+### Every operation has to be undoable exactly
+
+`text` and `replaceText` touch the element's **direct** text children only, and
+never its child elements — clearing an element's children is not what "remove the
+text" means, and it destroys layout. The removed nodes are recorded as
+`{parent, nextSibling, data}` on the layer, and teardown re-inserts them in
+original document order, preferring the saved next sibling and falling back to
+append. `element: "remove"` leaves a comment placeholder at the original position
+and keeps the element alive but detached, so undo is `placeholder.replaceWith(element)`.
+
+Teardown runs detached restores first, so an element being put back is connected
+before its own text is restored. Every DOM call is individually guarded: the
+bridge runs inside third-party pages and must never throw into one, and a restore
+whose parent has since left the document is skipped rather than resurrected into
+the wrong place.
 
 ### A fence info string within 2 edits still counts as an attempt
 
@@ -336,6 +391,48 @@ for the identical text without. The images flip the decision, which is why a
 text-only probe arm reported zero while the app kept hitting it. The gate closes it
 at the app layer (0 of 8), but the honest description of the bug is "a screenshot
 makes the model more willing to propose", not "the model ignores the handoff rule".
+
+## 6c. Two-stage routing (`src/ollama/route.ts`)
+
+Stage two used to be one pass: judge intent, read every measured value, write the
+answer and emit the machine block. On a real 9B that pass is where things go
+wrong. Stage one now asks one question in its own call — `CHANGE` or `ANSWER` —
+and stage two sees the verdict as a single line.
+
+Stage one's entire input is the user's own request text. No images, no component
+facts, no history. A turn carrying four screenshots spends about 4200 of an
+8192-token window on the prompt alone, which is exactly the cost stage one must
+not pay, and the facts would be the thing that tempts a verdict about the page
+rather than about the request. It runs with reasoning off and a 12-token cap, so a
+router that can write a paragraph has nothing to get wrong in it, and with a 4 s
+deadline, because it is on the critical path of every turn.
+
+Three properties are deliberate:
+
+- **The router can only subtract.** `previewIntent()` remains the enforcement, and
+  a `CHANGE` verdict on a request the gate has already suppressed still produces an
+  `ANSWER` line. That asymmetry *is* the safety argument: a wrong router verdict
+  can never restyle a page the user only asked about.
+- **`null` is not a third answer.** Unparseable, timed out, aborted, or failed all
+  return `null`, and the turn then proceeds byte-for-byte as it did before stage
+  one existed. A routing failure cannot cost a request its answer, so the function
+  is total — including on a malformed request object, and including its `finally`
+  block, where an unguarded property read would replace the `catch`'s `null` with a
+  rejected promise.
+- **The parse is strict.** A 9B asked for one word will sometimes answer
+  `Route: CHANGE` or `The user wants a change`, and a lenient parse turns a ramble
+  into a verdict. Anything but the bare label is no verdict at all.
+
+Measured on `hf.co/TaichuAI/ZDTaichu5.0-9B-GGUF:Q8_0`, 23 recorded cases: 19/23
+correct overall, median 97 ms. But on the eight handoff phrasings the gate is
+scored on, it was **5/8 where `previewIntent()` is 8/8** — strictly worse at the
+one job the gate exists for. It cost nothing only because of the subtract-only
+asymmetry. What it did change is the other direction: it suppresses 3 of the 13
+requests the gate lets through, all of them questions
+(`이 컴포넌트 어때?`, `이거 괜찮아?`, `이 버튼 대비 괜찮나?`), and 0 real change
+requests. That last figure is a direction, not a measured win — whether the model
+would have emitted a block on those three was not measured. The router is kept as
+cheap one-directional context, not claimed as an improvement to the gate.
 
 - `usePreviewController` turns one clean assistant completion into a single
   atomic transaction. It resolves `selectorId` to a strong anchor, applies a
@@ -802,15 +899,34 @@ block is a **proposal**, and it is provisional until the user decides:
 | ------------ | -------------------------------------------------------------- |
 | `pending`    | applied to the target, undecided                                 |
 | `accepted`   | the user pressed Accept; the change stays applied                 |
-| `rejected`   | the user pressed Reject, **or** sent the next message undecided   |
+| `rejected`   | the user pressed Reject; the change was rolled back              |
 
-Sending the next message settles every pending proposal as rejected. That is the
-deliberate policy, not an oversight: accept/reject is opt-in, and moving on is
-itself a decision. A rollback only touches the page when it is a reject; accept
-is a no-op on the target because the change is already applied.
+### Sending the next message is not a decision
 
-`src/preview/proposal.ts` derives all of this from the session and formats the
-lines. It is pure — it never touches the bridge or mutates a session.
+This used not to be true. `settlePending()` rolled back every undecided proposal
+before each send, on the theory that accept/reject is opt-in and moving on is
+itself a decision. The product now says otherwise, and the behaviour was reversed:
+
+- an undecided proposal stays undecided across any number of further messages;
+- its change stays applied to the live page throughout;
+- the toggle stays available for the whole conversation, so the user can change
+  their mind later rather than only in the moment the answer arrived.
+
+The cost is real and worth stating: a style the user did not ask for stays on the
+page while they talk about something else. The mitigation is that the toggle is
+never removed, so the change is always one click from being undone — and the
+default state of that toggle is Accept, because the change is already applied.
+
+`settlePending()` and its `SettledState` return value were removed along with the
+behaviour; there is no settle step left in the send path.
+
+### A decision touches the page in both directions
+
+Accept is not a no-op on the target. It re-applies a change that is not currently
+on the page, which is what makes the toggle reversible. It deliberately bypasses
+`claimScope()`, the guard that stops the automatic rebind effect from
+double-applying; `applyTransaction()` has its own in-flight guard, which is the
+right protection for a deliberate call.
 
 ### What a decision carries into the next turn
 
@@ -827,25 +943,17 @@ changed, on which component, and cannot drift from what was applied.
 ```
 - [accept] PrimaryButton: padding 12px 16px, border-radius 10px
 - [reject] SecondaryButton: background-color #f5f5f5 — reverted
+- [pending] NavLink: color #9ca3af — applied now, not confirmed
 ```
 
 Rejected proposals stay in the list on purpose — that is what stops the model
-re-proposing a direction the user already turned down.
+re-proposing a direction the user already turned down. Pending lines are listed
+first, so the live-but-unconfirmed state is not what the line cap truncates away.
 
-### Settling before the prompt is built
-
-`settlePending()` writes the settled messages and transactions in one commit and
-**returns them**. The caller builds the next prompt from the return value. A
-session read after the commit is still the pre-commit value, so reading it would
-silently drop the decisions from the request that just made them.
-
-Rollback order is newest-first, because later transactions layer on top of
-earlier ones.
-
-A known limit: if a pending proposal was the basis of a later accepted one,
-rolling it back leaves that later change computed against a state that no longer
-exists. This is structural, not a bug to fix; it is documented rather than
-hidden.
+`buildChangeLog()` still excludes pending. A pending change is on the page but not
+agreed, and the change log is rendered as the list of values someone will
+implement from; an unconfirmed entry there would read as confirmed work. Pending
+reaches the model through the decision context instead.
 
 ### The proposal document is deterministic
 

@@ -1,5 +1,12 @@
 import { validateDeclarations } from './cssPolicy.ts';
-import { MAX_PREVIEW_RULES, MAX_PREVIEW_TARGET } from './contract.ts';
+import {
+  MAX_PREVIEW_RULES,
+  MAX_PREVIEW_TARGET,
+  MAX_PREVIEW_TEXT_CHARS,
+  PREVIEW_ELEMENT_OPS,
+  PREVIEW_TEXT_OPS,
+} from './contract.ts';
+import type { PreviewElementOp, PreviewTextOp } from './contract.ts';
 
 export type PreviewRuntimeStatus =
   | 'pending-rebind'
@@ -43,7 +50,14 @@ export interface PreviewAnchor {
 export interface PreviewDeclarationRecord {
   target: number;
   anchor: PreviewAnchor;
+  /** Always present. Empty when the record carries only a text or element op. */
   declarations: Record<string, string>;
+  /** 'clear' removes the element's own text. */
+  text?: PreviewTextOp;
+  /** Replaces the element's own text. */
+  replaceText?: string;
+  /** 'hide' leaves the DOM alone, 'remove' detaches the element from it. */
+  element?: PreviewElementOp;
 }
 
 export type PreviewChangeRecord = PreviewDeclarationRecord;
@@ -80,7 +94,7 @@ const ANCHOR_KEYS = new Set([
   'testId',
   'path',
 ]);
-const CHANGE_KEYS = new Set(['target', 'anchor', 'declarations']);
+const CHANGE_KEYS = new Set(['target', 'anchor', 'declarations', 'text', 'replaceText', 'element']);
 const TRANSACTION_KEYS = new Set([
   'id',
   'assistantId',
@@ -155,13 +169,42 @@ export function parsePreviewChange(raw: unknown): PreviewChangeRecord | null {
   if (target === null) return null;
   const anchor = parsePreviewAnchor(raw['anchor']);
   if (anchor === null) return null;
-  const check = validateDeclarations(raw['declarations']);
+
+  // `declarations` is always stored, even when the record carries only a text
+  // or element op, so nothing downstream has to special-case the empty case.
+  const rawDeclarations = raw['declarations'];
+  const check = rawDeclarations === undefined
+    ? { ok: true as const, declarations: Object.freeze({} as Record<string, string>) }
+    : validateDeclarations(rawDeclarations);
   if (!check.ok) return null;
   const declarations: Record<string, string> = {};
   for (const [property, value] of Object.entries(check.declarations)) {
     declarations[property] = value;
   }
-  return { target, anchor, declarations };
+
+  const text = raw['text'];
+  if (text !== undefined && !PREVIEW_TEXT_OPS.includes(text as PreviewTextOp)) return null;
+  const element = raw['element'];
+  if (element !== undefined && !PREVIEW_ELEMENT_OPS.includes(element as PreviewElementOp)) return null;
+  const replaceText = raw['replaceText'];
+  if (replaceText !== undefined) {
+    if (text !== undefined) return null;
+    if (typeof replaceText !== 'string' || replaceText.length > MAX_PREVIEW_TEXT_CHARS) return null;
+  }
+  if (
+    Object.keys(declarations).length === 0 &&
+    text === undefined &&
+    element === undefined &&
+    replaceText === undefined
+  ) {
+    return null;
+  }
+
+  const record: PreviewChangeRecord = { target, anchor, declarations };
+  if (text !== undefined) record.text = text as PreviewTextOp;
+  if (element !== undefined) record.element = element as PreviewElementOp;
+  if (typeof replaceText === 'string') record.replaceText = replaceText;
+  return record;
 }
 
 export function parsePreviewTransaction(raw: unknown): PreviewTransaction | null {

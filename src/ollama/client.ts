@@ -66,31 +66,39 @@ Security and evidence rules:
 - Do not replace specific findings with generic design advice.
 
 Decisions already made in this session:
-- The user design decisions block lists changes the user accepted or rejected. Treat an accepted line as the current agreed state and build on it rather than re-proposing it. Treat a rejected line as a direction that was already turned down and do not offer it again.
+- The user design decisions block lists changes the user accepted, rejected, or has not decided yet. Treat an accepted line as the current agreed state and build on it rather than re-proposing it. Treat a rejected line as a direction that was already turned down and do not offer it again. Treat a pending line as a change that is on the page right now but the user has not confirmed: it is the current state of the live preview, so describe it as applied now, and neither treat it as agreed work nor propose it again.
 - Those lines are preferences, not visual evidence: they are never a source of measured style values.
 
 Keep the response focused and practical. Do not provide full production code unless the user explicitly requests it.
 
 Optional machine block (live preview hints):
-- This block is optional, and it is not a formatting flourish. Omit it completely unless the user asked you to CHANGE something and the change is expressible as purely visual property values.
+- This block is optional, and it is not a formatting flourish. Omit it completely unless the user asked you to CHANGE something and the change is expressible in this block.
 - Decide with one question: did the user instruct you to change, apply, adjust, increase, decrease or restyle something? 바꿔줘, 적용해줘, 조정해줘, 늘려줘, 줄여줘 are instructions. 알려줘, 어때요, 괜찮나요, 확인해줘, 리뷰해줘 are questions about the current state. For a question, answer in words and emit no block at all.
 - If the user explicitly says not to change anything (바꾸지 마, 건드리지 마, 그대로 둬), that decision stands even if you notice something worth changing. Say what you noticed in words and emit no block.
 - A block restyles the live page immediately, so guessing that one was wanted changes the product behind the user's back. When you are unsure whether they wanted a change, describe the change in prose and let them ask for it.
 - When you do emit it, it must be the very last thing in the response, and it must be the only fenced code block in the response. If you want to show CSS as well, write it inline in prose instead. Mixing a normal code fence with this one corrupts the machine block.
 - Write it exactly like this, with three backticks, the info string, and nothing else on the fence line:
 \`\`\`design-inspector-preview
-{"version":1,"rules":[{"target":1,"declarations":{"border-radius":"10px","background-color":"#f5f5f5"}}]}
+{"version":2,"rules":[{"target":1,"declarations":{"border-radius":"10px","background-color":"#f5f5f5"}}]}
 \`\`\`
 - The opening fence with the info string design-inspector-preview must sit alone on its own line, the JSON object must occupy the following lines, and the closing fence must follow. After the closing fence only whitespace is allowed: any visible text after it invalidates the block.
-- The JSON object must contain exactly the keys "version" (the number 1) and "rules" (an array of 1 to 12 objects). Every rule object must contain exactly the keys "target" and "declarations".
+- The JSON object must contain exactly the keys "version" (the number 2) and "rules" (an array of 1 to 12 objects).
+- Every rule object must contain "target" and at least one operation. The operations are "declarations", "text", "replaceText" and "element". A rule with nothing but "target" does nothing and the whole block is rejected.
 - "target" is the citation number of the element you are restyling, as an integer taken from the inspected citation list. Never invent a citation number.
 - "declarations" maps CSS property names to string values. Emit property names only; never emit selectors, at-rules, or nested CSS.
+- "text":"clear" deletes the element's own words and leaves the element itself in place. Use it when the user asks to take the text off a font-only component.
+- "replaceText":"..." puts that string in place of the element's own words, at most 200 characters. Use it when the user asks for different words. Never emit it in the same rule as "text".
+- "element":"hide" takes the component out of the render and keeps it in the DOM. "element":"remove" detaches it from the DOM. Use "hide" for a component that may come back, "remove" for one that is gone.
+- A rule for those looks like {"target":1,"text":"clear"}, {"target":1,"replaceText":"주문하기"} or {"target":1,"element":"hide"}.
+- Never remove text with "color":"transparent" or "font-size":"0". Both only hide it: the element still occupies its box, still takes part in layout, and its text is still in the page. For words that must be gone, emit "text":"clear"; for a component that must be gone, emit "element".
+- The "element" operation is the only way to hide or remove a component. "display" and "visibility" stay forbidden inside "declarations", so never reach for them to get the same result.
 - The component facts are already written with real CSS property names, so a fact and a declaration are the same vocabulary. Read the value, then name the property the way the facts name it. Never invent a token from a facts label, and never echo a fact label into your prose: a reader cannot parse "box=12px 16px", so write "padding 12px 16px".
 - Allowed CSS properties (exact names, nothing else): ${VISUAL_ONLY_CSS_PROPERTIES.join(', ')}.
 - Allowed value forms: bounded lengths in px, rem, em, ch, pt, vh, vw, vmin, vmax or % (absolute values from -4000 to 4000, percentages from -400% to 400%); hex colors, rgb()/rgba()/hsl()/hsla() with numeric arguments, or plain color keywords; 1 to 4 lengths for margin, padding, border-width and border-radius; font-family with up to 4 quoted or bare family names; numbers for opacity, font-weight, line-height and aspect-ratio; the fixed keyword sets for font-style, text-align, text-transform, text-decoration-line, text-overflow, white-space, overflow, border-style and vertical-align; and box-shadow built from lengths plus an optional color and an optional inset.
 - gap, row-gap and column-gap are allowed: spacing between items is a visual change you may propose.
 - Never emit position, z-index, display, flex or grid properties, animation, transition, transform, content, custom properties, url(), var(), calc(), comments, backslash escapes, or !important.
 - The block is machine-only: never mention it, never explain it, and never let it replace or annotate your answer.`;
+
 
 const MAX_DECISIONS = 24;
 
@@ -120,7 +128,9 @@ export function buildSystemPrompt(
 ): string {
   const decisions = decisionSummary(history, transactions);
   if (decisions.length === 0) return DESIGN_INSPECTOR_SYSTEM_PROMPT;
-  return `${DESIGN_INSPECTOR_SYSTEM_PROMPT}\n\nChanges already decided in this session:\n${decisions.join('\n')}`;
+  // "On the page", not "already decided": a pending proposal is applied and
+  // unconfirmed, and calling it decided is what the model then repeats back.
+  return `${DESIGN_INSPECTOR_SYSTEM_PROMPT}\n\nChanges on the page in this session:\n${decisions.join('\n')}`;
 }
 
 export function normalizeBaseUrl(raw: string): string {
@@ -342,6 +352,7 @@ export function buildTransmissionPrompt(
   rawRequest: string,
   citations: CitationSnapshot[],
   visual?: VisualTransmission,
+  routeLine?: string | null,
 ): string {
   const sections: string[] = [];
   if (citations.length > 0) {
@@ -411,6 +422,9 @@ export function buildTransmissionPrompt(
   }
   const focus = focusHint(rawRequest);
   if (focus !== null) sections.push(focus);
+  // Stage one lands immediately above the request it judged: the last thing read
+  // before the words themselves, and nowhere near anything the user sees.
+  if (routeLine !== undefined && routeLine !== null) sections.push(routeLine);
   sections.push(`User request:\n${rawRequest}`);
   return sections.join('\n\n');
 }
@@ -476,6 +490,7 @@ export async function streamChat(
   cb: ChatCallbacks,
   transactions: readonly PreviewTransaction[] = [],
   generation: GenerationSettings = DEFAULT_GENERATION_SETTINGS,
+  routeLine: string | null = null,
 ): Promise<void> {
   const base = normalizeBaseUrl(baseUrl);
   const parser = new OllamaStreamParser();
@@ -494,7 +509,7 @@ export async function streamChat(
           ...toOllamaHistory(history, visual?.images.length ?? 0, generation),
           {
             role: 'user',
-            content: buildTransmissionPrompt(rawRequest, citations, visual),
+            content: buildTransmissionPrompt(rawRequest, citations, visual, routeLine),
             ...(visual && visual.images.length > 0 ? { images: visual.images } : {}),
           },
         ],

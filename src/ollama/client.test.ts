@@ -5,11 +5,14 @@ import {
   buildTransmissionPrompt,
   MAX_RESPONSE_CHARS,
   PREVIEW_BLOCK_LANGUAGE,
+  PREVIEW_SCHEMA_VERSION,
   PreviewSidecarParser,
   streamChat,
   validatePreviewBlock,
+  validatePreviewPayload,
 } from './client.ts';
 import { DEFAULT_GENERATION_SETTINGS } from './params.ts';
+import { routeContextLine } from './route.ts';
 import type { ChatDoneMeta } from './client.ts';
 import type { ChatMessage, CitationSnapshot } from '../state/models.ts';
 import type { StyleFacts } from '../protocol/types.ts';
@@ -50,6 +53,10 @@ const VISUAL = {
   images: ['sheet', 'crop'],
   citationNumbers: [null, 1],
 };
+
+// Stage one runs in useChat, not here; the prompt only carries its line.
+const ROUTE_CHANGE = routeContextLine('간격 바꿔줘', 'CHANGE') as string;
+
 
 function promptPropertyList(): string[] {
   const line = DESIGN_INSPECTOR_SYSTEM_PROMPT.split('\n').find((entry) =>
@@ -485,8 +492,7 @@ describe('DESIGN_INSPECTOR_SYSTEM_PROMPT preview contract', () => {
       'This block is optional, and it is not a formatting flourish',
     );
     expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain('```design-inspector-preview');
-    expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain('"version" (the number 1) and "rules"');
-    expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain('exactly the keys "target" and "declarations"');
+    expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain('"version" (the number 2) and "rules"');
     expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain('After the closing fence only whitespace');
     expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain('Never invent a citation number.');
     expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain(
@@ -496,6 +502,48 @@ describe('DESIGN_INSPECTOR_SYSTEM_PROMPT preview contract', () => {
       DESIGN_INSPECTOR_SYSTEM_PROMPT.indexOf('Optional machine block'),
     );
   });
+
+  it('teaches the v2 operations, because nothing else will', () => {
+    // v1 could only set properties, so three real requests had no answer and the
+    // model improvised one. It reached for `color: transparent` on three
+    // font-only components: the text vanished, the boxes stayed, and the user
+    // got component facts instead of a change. The prompt is the only place the
+    // model learns the operations exist.
+    const prompt = DESIGN_INSPECTOR_SYSTEM_PROMPT;
+    expect(prompt).toContain('"text":"clear"');
+    expect(prompt).toContain('"replaceText"');
+    expect(prompt).toContain('"element":"hide"');
+    expect(prompt).toContain('"element":"remove"');
+    expect(prompt).toContain('font-only component');
+    expect(prompt).toContain('at least one operation');
+    // The two substitutions that produce a no-op the user cannot see.
+    expect(prompt).toContain('Never remove text with "color":"transparent" or "font-size":"0"');
+    expect(prompt).toContain('still occupies its box');
+    // `element` is the only route, and that is why the denylist has to hold.
+    expect(prompt).toContain('The "element" operation is the only way to hide or remove a component');
+    expect(prompt).toContain('"display" and "visibility" stay forbidden inside "declarations"');
+    // The one hard constraint the new operations must not erode.
+    expect(prompt).toContain('it must be the only fenced code block in the response');
+  });
+
+  it('ships a v2 example, and the operation examples all parse', () => {
+    const example = /```design-inspector-preview\n(.+)\n```/.exec(DESIGN_INSPECTOR_SYSTEM_PROMPT);
+    expect(example).not.toBeNull();
+    const json = example?.[1] ?? '';
+    const check = validatePreviewBlock(json, { knownCitationNumbers: [1] });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    // The version in the prose and the version in the example cannot drift.
+    expect(check.candidate.version).toBe(PREVIEW_SCHEMA_VERSION);
+    expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain(`"version":${PREVIEW_SCHEMA_VERSION}`);
+    // The inline operation examples are real rules, not pseudocode.
+    for (const inline of ['{"target":1,"text":"clear"}', '{"target":1,"element":"hide"}']) {
+      expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain(inline);
+      const parsed = validatePreviewPayload({ version: PREVIEW_SCHEMA_VERSION, rules: [JSON.parse(inline)] });
+      expect({ inline, ok: parsed.ok }).toEqual({ inline, ok: true });
+    }
+  });
+
 
   it('tells the model that spacing between items is allowed, matching the validator', () => {
     expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain(
@@ -633,11 +681,27 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('- [reject] PrimaryButton: padding 12px 16px — reverted');
   });
 
-  it('leaves an undecided proposal out of the prompt entirely', () => {
+  it('carries an undecided proposal as a pending line, not as a decision', () => {
+    // Sending the next message is not a decision. The change is on the live page
+    // right now, so a model that cannot see it will describe the old value as
+    // current or propose the same change again — and calling it accepted would
+    // have it claim agreement the user never gave.
     const message = decided('pending answer', 'accepted');
     const prompt = buildSystemPrompt([{ ...message, decision: undefined }], [transaction]);
-    expect(prompt).toBe(DESIGN_INSPECTOR_SYSTEM_PROMPT);
+    expect(prompt).toContain('- [pending] PrimaryButton: padding 12px 16px — applied now, not confirmed');
+    expect(prompt).not.toContain('- [accept]');
+    expect(prompt).not.toContain('- [reject]');
+    // The header cannot say "already decided" any more, and the wording rule
+    // has to admit the third state.
+    expect(prompt).toContain('Changes on the page in this session:');
+    expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain(
+      'lists changes the user accepted, rejected, or has not decided yet',
+    );
+    expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain(
+      'Treat a pending line as a change that is on the page right now but the user has not confirmed',
+    );
   });
+
 
   it('adds nothing when the message carries no transaction', () => {
     const prompt = buildSystemPrompt(
@@ -927,7 +991,7 @@ it('tells the model to leave a non-visual request without a preview block', () =
   // Measured: on a plain critique and on a "write the handoff" request the 9B
   // still emitted a machine block, which silently restyles the page.
   expect(DESIGN_INSPECTOR_SYSTEM_PROMPT).toContain(
-    'Omit it completely unless the user asked you to CHANGE something and the change is expressible as purely visual property values.',
+    'Omit it completely unless the user asked you to CHANGE something and the change is expressible in this block.',
   );
 });
 
@@ -936,4 +1000,47 @@ it('tells the model to leave a non-visual request without a preview block', () =
     const prompt = buildTransmissionPrompt('마지막 요청', [citation({ styleFacts: FACTS })]);
     expect(prompt.endsWith('User request:\n마지막 요청')).toBe(true);
   });
+
+  it('carries a route line, and carries nothing when there is none', () => {
+    // Stage one is a separate decision from the answer, so it is one line in
+    // the request rather than a section the model can quote back.
+    const routed = buildTransmissionPrompt('간격 바꿔줘', [], undefined, ROUTE_CHANGE);
+    expect(routed).toContain(ROUTE_CHANGE);
+    expect(routed.indexOf(ROUTE_CHANGE)).toBeLessThan(routed.indexOf('User request:'));
+    expect(routed.endsWith('User request:\n간격 바꿔줘')).toBe(true);
+    // A routing failure must leave the prompt exactly as it was.
+    for (const empty of [null, undefined]) {
+      const plain = buildTransmissionPrompt('간격 바꿔줘', [], undefined, empty);
+      expect(plain).toBe(buildTransmissionPrompt('간격 바꿔줘', []));
+      expect(plain).not.toContain('Route:');
+    }
+  });
+
+  it('passes the route line to the model and never puts it in the answer', async () => {
+    // It goes in the request only. The user reads the streamed text, so a route
+    // verdict surfacing there would be the app talking about the app.
+    const fetchMock = vi.fn(async () => streamingResponse(['간격 늘렸습니다\n']));
+    vi.stubGlobal('fetch', fetchMock);
+    let text = '';
+    await streamChat(
+      'http://localhost:11434',
+      'm',
+      [],
+      '간격 바꿔줘',
+      [CITATION],
+      undefined,
+      new AbortController().signal,
+      { onToken: (token) => { text += token; }, onDone: () => undefined, onError: () => undefined },
+      [],
+      DEFAULT_GENERATION_SETTINGS,
+      ROUTE_CHANGE,
+    );
+    const body = readBody(fetchMock as unknown as { mock: { calls: unknown[][] } });
+    const sent = JSON.stringify(body.messages);
+    expect(sent).toContain(ROUTE_CHANGE);
+    expect(text).toBe('간격 늘렸습니다\n');
+    expect(text).not.toContain('Route:');
+    vi.unstubAllGlobals();
+  });
 });
+

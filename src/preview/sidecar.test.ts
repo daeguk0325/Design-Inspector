@@ -187,12 +187,34 @@ describe('PreviewSidecarParser', () => {
 
   it('rejects blocks with unknown keys or an unknown version', () => {
     const extra = JSON.stringify({ version: 1, rules: [{ target: 1, declarations: { color: 'red' } }], extra: true });
-    const v2 = JSON.stringify({ version: 2, rules: [{ target: 1, declarations: { color: 'red' } }] });
-    for (const body of [extra, v2]) {
+    // 2 is the current version, so the unsupported one is 3.
+    const v3 = JSON.stringify({ version: 3, rules: [{ target: 1, declarations: { color: 'red' } }] });
+    for (const body of [extra, v3]) {
       const { text, candidate } = run([`${KOREAN_PREFIX}\n\`\`\`design-inspector-preview\n${body}\n\`\`\`\n`]);
       expect(text).toBe(`${KOREAN_PREFIX}\n`);
       expect(candidate).toBeNull();
     }
+  });
+
+  it('commits a v2 block that carries only an operation, and strips it from the text', () => {
+    // The font-only component case: three rules, no declarations, nothing to
+    // show the reader.
+    const body = JSON.stringify({
+      version: 2,
+      rules: [
+        { target: 1, declarations: {}, text: 'clear' },
+        { target: 2, declarations: {}, element: 'remove' },
+      ],
+    });
+    const { text, candidate } = run([`${KOREAN_PREFIX}\n\`\`\`design-inspector-preview\n${body}\n\`\`\`\n`]);
+    expect(text).toBe(`${KOREAN_PREFIX}\n`);
+    expect(candidate).toEqual({
+      version: 2,
+      rules: [
+        { target: 1, declarations: {}, text: 'clear' },
+        { target: 2, declarations: {}, element: 'remove' },
+      ],
+    });
   });
 
   it('rejects duplicate citation numbers inside one block', () => {

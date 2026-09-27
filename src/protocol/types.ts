@@ -269,7 +269,14 @@ export type PreviewAnchorStatus = 'applied' | 'unbound' | 'ambiguous' | 'rejecte
 
 export interface PreviewAnchorChange {
   anchor: InspectorAnchor;
+  /** Always present. Empty when the change carries only a text or element op. */
   declarations: Record<string, string>;
+  /** 'clear' removes the element's own text. */
+  text?: 'clear';
+  /** Replaces the element's own text. */
+  replaceText?: string;
+  /** 'hide' leaves the DOM alone, 'remove' detaches the element from it. */
+  element?: 'hide' | 'remove';
 }
 
 export interface PreviewApplyPayload {

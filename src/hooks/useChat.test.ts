@@ -28,6 +28,7 @@ afterEach(() => {
     act(() => entry.root.unmount());
     entry.container.remove();
   }
+  routeLabel = null;
   vi.unstubAllGlobals();
 });
 
@@ -87,21 +88,50 @@ function manualResponse(): ManualStream {
 interface RecordedRequest {
   url: string;
   messages: Array<{ role: string; content: string; images?: string[] }>;
+  /** Stage one sends `stream: false`; the main completion sends `stream: true`. */
+  chat: boolean;
 }
 
+/**
+ * What the stage-one classifier answers. `null` is the default everywhere else
+ * in this file, so those tests describe the turn exactly as it behaved before
+ * stage one existed; the routing tests set it explicitly.
+ */
+let routeLabel: string | null = null;
+
+function routeResponse(label: string | null): Response {
+  if (label === null) return new Response('unavailable', { status: 503 });
+  return new Response(JSON.stringify({ message: { content: label } }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+/**
+ * `chat` counts only the main completion, so a test that drives a manual stream
+ * does not have to count the classifier call before it.
+ */
 function stubFetch(responder: (index: number) => Response): RecordedRequest[] {
   const log: RecordedRequest[] = [];
+  let chatIndex = 0;
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body ?? '{}')) as {
         messages: RecordedRequest['messages'];
+        stream?: boolean;
       };
-      log.push({ url: String(input), messages: body.messages });
-      return responder(log.length - 1);
+      const chat = body.stream === true;
+      log.push({ url: String(input), messages: body.messages, chat });
+      return chat ? responder(chatIndex++) : routeResponse(routeLabel);
     }),
   );
   return log;
+}
+
+/** The main completion requests only, in order. Stage one is not one of them. */
+function chatRequests(log: RecordedRequest[]): RecordedRequest[] {
+  return log.filter((entry) => entry.chat);
 }
 
 interface PatchCall {
@@ -250,7 +280,11 @@ function decidedMessage(): ChatMessage {
 }
 
 function lastSystemPrompt(log: RecordedRequest[]): string {
-  return log.at(-1)?.messages.find((m) => m.role === 'system')?.content ?? '';
+  return chatRequests(log).at(-1)?.messages.find((m) => m.role === 'system')?.content ?? '';
+}
+
+function lastUserPrompt(log: RecordedRequest[]): string {
+  return chatRequests(log).at(-1)?.messages.find((m) => m.role === 'user')?.content ?? '';
 }
 
 async function send(
@@ -319,8 +353,8 @@ describe('useChat streaming with the preview sidecar', () => {
     const log = stubFetch(() => contentResponse(['본문 [1]\n']));
     const api = mountChat();
     expect(await send(api, store, 'session-a', '시각 개선안')).toBe(true);
-    const messages = log[0]?.messages ?? [];
-    expect(log[0]?.url).toBe('http://localhost:11434/api/chat');
+    const messages = chatRequests(log)[0]?.messages ?? [];
+    expect(chatRequests(log)[0]?.url).toBe('http://localhost:11434/api/chat');
     expect(messages[0]).toEqual({ role: 'system', content: DESIGN_INSPECTOR_SYSTEM_PROMPT });
     expect(messages[0]?.content).toContain('Respond entirely in Korean');
     expect(messages.at(-1)).toMatchObject({ role: 'user' });
@@ -407,7 +441,7 @@ describe('useChat streaming with the preview sidecar', () => {
       withDecision,
     );
     const second = lastSystemPrompt(log);
-    expect(second).toContain('Changes already decided in this session');
+    expect(second).toContain('Changes on the page in this session');
     expect(second).toContain('- [accept] PrimaryButton: padding 12px');
   });
   it('reports a clean completion without a candidate when no block is emitted', async () => {
@@ -635,6 +669,101 @@ describe('useChat attempt identity guards', () => {  it('keeps an interrupted at
     expect(onSecondComplete.mock.calls[0]?.[0].candidate).toEqual(CANDIDATE);
     expect(store.patches.slice(patchMark).every((call) => call.id !== firstAssistant.id)).toBe(true);
     expect(lastAssistant(store, 'session-a').content).toBe(PARTIAL);
-    expect(log).toHaveLength(2);
+    // Two turns, one stage-one call each, plus the first turn's stage one.
+    expect(chatRequests(log)).toHaveLength(2);
+    expect(log).toHaveLength(4);
+  });
+});
+
+describe('useChat two-stage routing', () => {
+  it('asks stage one first, with the request text and no images', async () => {
+    const store = createStore();
+    const log = stubFetch(() => contentResponse(['응답\n']));
+    const api = mountChat();
+    await send(api, store, 'session-a', '간격 16px로 바꿔줘');
+    // The classifier runs before the completion, and it runs first.
+    expect(log[0]?.chat).toBe(false);
+    expect(log[1]?.chat).toBe(true);
+    expect(log[0]?.messages).toHaveLength(2);
+    expect(log[0]?.messages[1]).toEqual({ role: 'user', content: '간격 16px로 바꿔줘' });
+    // No facts and no screenshots: that is the cost stage one exists to skip.
+    expect(JSON.stringify(log[0]?.messages)).not.toContain('Component facts');
+    expect(log[0]?.messages[1]?.images).toBeUndefined();
+  });
+
+  it('puts one route line in the request and nowhere the user can see', async () => {
+    const store = createStore();
+    routeLabel = 'CHANGE';
+    const log = stubFetch(() => contentResponse(['간격을 늘렸습니다\n']));
+    const api = mountChat();
+    await send(api, store, 'session-a', '간격 16px로 바꿔줘');
+    const sent = lastUserPrompt(log);
+    expect(sent.match(/^Route: /gm)).toHaveLength(1);
+    expect(sent).toContain('Route: CHANGE — the user asked for a change to the page.');
+    expect(sent.indexOf('Route: CHANGE')).toBeLessThan(sent.indexOf('User request:'));
+    const assistant = lastAssistant(store, 'session-a');
+    expect(assistant.content).toBe('간격을 늘렸습니다\n');
+    expect(assistant.content).not.toContain('Route:');
+    expect(JSON.stringify(store.messages.get('session-a'))).not.toContain('Route:');
+  });
+
+  it('sends the answer when stage one says the request was a question', async () => {
+    const store = createStore();
+    routeLabel = 'ANSWER';
+    const log = stubFetch(() => contentResponse(['현재 padding은 12px입니다\n']));
+    const api = mountChat();
+    await send(api, store, 'session-a', '이 컴포넌트 어때?');
+    expect(lastUserPrompt(log)).toContain('Route: ANSWER — the user asked a question');
+  });
+
+  it('sends nothing extra when stage one fails', async () => {
+    // The classifier 503s here. A routing failure has to be invisible: the turn
+    // is byte-for-byte the turn this app sent before stage one existed, so a
+    // broken router cannot cost the user their preview or their answer.
+    const store = createStore();
+    routeLabel = null;
+    const log = stubFetch(() => contentResponse(['본문 [1]\n']));
+    const api = mountChat();
+    expect(await send(api, store, 'session-a', '간격 16px로 바꿔줘')).toBe(true);
+    expect(lastUserPrompt(log)).not.toContain('Route:');
+    expect(lastAssistant(store, 'session-a').status).toBe('completed');
+    expect(lastAssistant(store, 'session-a').content).toBe('본문 [1]\n');
+  });
+
+  it('never lets a CHANGE verdict force a block onto a request the gate suppressed', async () => {
+    // The safety property end to end: the router says CHANGE, the user's own
+    // words say a handoff, and the block is still stripped.
+    const store = createStore();
+    routeLabel = 'CHANGE';
+    const log = stubFetch(() => contentResponse(blockFragments(BLOCK_JSON)));
+    const api = mountChat();
+    const onComplete = vi.fn<(completion: ChatCompletion) => void>();
+    await send(api, store, 'session-a', '이거 디자이너한테 전달문 만들어줘', onComplete);
+    expect(lastUserPrompt(log)).not.toContain('Route: CHANGE');
+    expect(lastUserPrompt(log)).toContain('Route: ANSWER');
+    expect(onComplete.mock.calls[0]?.[0].candidate).toBeNull();
+    expect(lastAssistant(store, 'session-a').content).toBe(VISIBLE);
+  });
+
+  it('keeps the deterministic gate as the only thing that strips a block', async () => {
+    // A router that says ANSWER on a real change request must not strip the
+    // block: it is context for stage two, and the gate still decides.
+    const store = createStore();
+    routeLabel = 'ANSWER';
+    stubFetch(() => contentResponse(blockFragments(BLOCK_JSON)));
+    const api = mountChat();
+    const onComplete = vi.fn<(completion: ChatCompletion) => void>();
+    await send(api, store, 'session-a', '간격 16px로 바꿔줘', onComplete);
+    expect(onComplete.mock.calls[0]?.[0].candidate).toEqual(CANDIDATE);
+  });
+
+  it('still strips the block on a handoff when the router also says ANSWER', async () => {
+    const store = createStore();
+    routeLabel = 'ANSWER';
+    stubFetch(() => contentResponse(blockFragments(BLOCK_JSON)));
+    const api = mountChat();
+    const onComplete = vi.fn<(completion: ChatCompletion) => void>();
+    await send(api, store, 'session-a', '이거 디자이너한테 전달문 만들어줘', onComplete);
+    expect(onComplete.mock.calls[0]?.[0].candidate).toBeNull();
   });
 });

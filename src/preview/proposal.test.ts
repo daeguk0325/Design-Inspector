@@ -130,10 +130,35 @@ describe('proposal state', () => {
 });
 
 describe('decision context lines', () => {
-  it('describes the change, not the answer text', () => {
-    const lines = decisionContextLines(session().messages, session().previewTransactions);
-    // pending is skipped entirely: it is not a decision yet.
-    expect(lines).toEqual([]);
+  it('carries a pending change as live but unconfirmed, and not the answer text', () => {
+    const s = session();
+    const lines = decisionContextLines(
+      [{ ...s.messages[1]!, content: 'the answer text' }],
+      s.previewTransactions,
+    );
+    // Pending is carried now: the change is on the page, so the model has to
+    // know. It is marked pending so it is not read as agreed work.
+    expect(lines).toEqual(['- [pending] PrimaryButton: padding 12px — applied now, not confirmed']);
+    expect(lines.join('\n')).not.toContain('the answer text');
+  });
+
+  it('keeps a pending line when the settled log has already filled the cap', () => {
+    const settled = Array.from({ length: 24 }, (_value, index) =>
+      transaction({
+        id: `tx-${index}`,
+        assistantId: `a-${index}`,
+        changes: [
+          { target: 1, anchor: anchor(), declarations: { [`--done-${index}`]: '1px' } as Record<string, string> },
+        ],
+      }),
+    );
+    const messages = [
+      ...settled.map((t) => ({ ...assistant({ id: t.assistantId, previewTransactionId: t.id, decision: 'accepted' as const }) })),
+      assistant({ id: 'a-live', previewTransactionId: 'tx-live', createdAt: 99 }),
+    ];
+    const lines = decisionContextLines(messages, [...settled, transaction({ id: 'tx-live', assistantId: 'a-live' })]);
+    expect(lines).toHaveLength(24);
+    expect(lines[0]).toBe('- [pending] PrimaryButton: padding 12px — applied now, not confirmed');
   });
 
   it('marks an accepted change with the component and the declaration', () => {
@@ -311,7 +336,7 @@ describe('change log', () => {
     expect(buildChangeLog(s.messages, s.previewTransactions)[0]?.before).toBeNull();
   });
 
-  it('excludes rejected and still-pending proposals', () => {
+  it('excludes rejected and still-pending proposals, so the log only claims confirmed work', () => {
     const rejected = session({ messages: [user(), { ...assistant(), decision: 'rejected' }] });
     const pending = session();
     expect(buildChangeLog(rejected.messages, rejected.previewTransactions)).toEqual([]);

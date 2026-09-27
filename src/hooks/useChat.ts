@@ -4,6 +4,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { streamChat } from '../ollama/client.ts';
 import { shouldSuppressBlock } from '../ollama/intent.ts';
+import { classifyRoute, routeContextLine } from '../ollama/route.ts';
 import type { ChatMessage, CitationSnapshot, MessagePatch } from '../state/models.ts';
 import { capThinking, citationFromRecord, makeId } from '../state/models.ts';
 import type { SelectionRecord } from '../protocol/types.ts';
@@ -86,11 +87,21 @@ export function useChat(): ChatApi {
       let thinking = '';
       const sidecar = new PreviewSidecarParser(
         { knownCitationNumbers: citations.map((citation) => citation.displayNumber) },
-        // Decided from the request, before any of the model's output exists.
+        // Decided from the request, before any of the model's output exists, and
+        // from `previewIntent` alone. The stage-one router is deliberately not
+        // part of this decision: it can only ever subtract, and the gate is what
+        // enforces that.
         { suppressBlock: shouldSuppressBlock(rawRequest) },
       );
       const isCurrentAttempt = (): boolean =>
         activeSessionRef.current === sessionId && activeAssistantRef.current === assistantId;
+      // Stage one, before the main completion. A failure, a timeout or an
+      // unparseable answer all come back as null and leave no line behind, so
+      // the turn below is byte-for-byte the turn this app would have sent.
+      const routeLine = routeContextLine(
+        rawRequest,
+        await classifyRoute({ baseUrl, model, rawRequest, signal: ctrl.signal }),
+      );
       const applyVisible = (text: string): void => {
         if (text === '') return;
         gotToken = true;
@@ -120,7 +131,7 @@ export function useChat(): ChatApi {
         onError: (msg) => {
           errored = msg;
         },
-      }, transactions, generation);
+      }, transactions, generation, routeLine);
       const wasAborted = ctrl.signal.aborted;
       // Never silently mark interrupted streams successful (§16.7).
       if (isCurrentAttempt()) {

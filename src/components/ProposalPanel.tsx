@@ -77,7 +77,7 @@ export function ProposalPanel({ open, session, onClose, onCopy }: ProposalPanelP
       <div className="proposal-panel-body">
         {groups.length === 0 ? (
           <p className="proposal-empty">
-            Accept를 누른 수정만 여기에 쌓입니다. 다음 요청을 보내면 대기 중인 제안은 자동으로 되돌려집니다.
+            Accept를 누른 수정만 여기에 쌓입니다. 대기 중인 제안은 다음 요청을 보내도 그대로 남아 있습니다.
           </p>
         ) : (
           groups.map((group) => <GroupBlock key={group.component} group={group} />)

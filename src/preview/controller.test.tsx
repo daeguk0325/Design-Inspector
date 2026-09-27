@@ -1355,14 +1355,17 @@ describe('proposal decisions', () => {
   it('keeps the preview applied when the user accepts', async () => {
     const harness = await withProposal();
     harness.bridge.undoPreview.mockClear();
+    harness.bridge.applyPreview.mockClear();
     await act(async () => {
       await harness.controller().decide('a1', 'accepted');
     });
     await settle();
     harness.render();
     expect(harness.message('a1').decision).toBe('accepted');
-    // Accept is a no-op on the target: the change is already applied.
+    // Already applied, so Accept confirms it: it must not undo, and it must not
+    // send a second apply for a change the page is already showing.
     expect(harness.bridge.undoPreview).not.toHaveBeenCalled();
+    expect(harness.bridge.applyPreview).not.toHaveBeenCalled();
     expect(harness.transaction('a1').enabled).toBe(true);
     expect(harness.controller().pendingCount).toBe(0);
     expect(harness.controller().previews.get('a1')?.proposalState).toBe('accepted');
@@ -1384,54 +1387,89 @@ describe('proposal decisions', () => {
     expect(harness.controller().activeCount).toBe(0);
   });
 
-  it('rejects every undecided proposal when the next message is sent', async () => {
+  it('reapplies the change when the user flips a rejection back to accept', async () => {
     const harness = await withProposal();
+    await act(async () => {
+      await harness.controller().decide('a1', 'rejected');
+    });
+    await settle();
+    harness.render();
+    expect(harness.transaction('a1').status).toBe('undone');
+    const apply = harness.bridge.applyPreview;
+    apply.mockClear();
+    harness.bridge.undoPreview.mockClear();
+
     await act(async () => {
       await harness.controller().decide('a1', 'accepted');
     });
     await settle();
-    await applyClean(harness, pairCompletion('a2', 'sess'));
+    harness.render();
+    expect(harness.message('a1').decision).toBe('accepted');
+    // The page has to show what the recorded decision says, so Accept puts the
+    // change back rather than only updating the message.
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(apply).toHaveBeenCalledWith('sess', harness.transaction('a1').id, [
+      { anchor: citation(1).anchor, declarations: { color: '#111111' } },
+    ]);
+    expect(harness.bridge.undoPreview).not.toHaveBeenCalled();
+    expect({ status: harness.transaction('a1').status, enabled: harness.transaction('a1').enabled }).toEqual({
+      status: 'applied',
+      enabled: true,
+    });
+    expect(harness.controller().activeCount).toBe(1);
+    expect(harness.controller().previews.get('a1')?.proposalState).toBe('accepted');
+  });
+
+  it('reapplies through the effect guard exactly once, not once per render', async () => {
+    const harness = await withProposal();
+    await act(async () => {
+      await harness.controller().decide('a1', 'rejected');
+    });
+    await settle();
+    harness.render();
+    const apply = harness.bridge.applyPreview;
+    apply.mockClear();
+
+    await act(async () => {
+      await harness.controller().decide('a1', 'accepted');
+    });
+    await settle();
+    for (let index = 0; index < 4; index += 1) harness.render();
+    await harness.settle();
+    harness.render();
+    // The re-enabled transaction is in scope for the automatic rebind effect,
+    // and claimScope has already spent this scope: a deliberate re-apply is not
+    // doubled by the effect that follows it.
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(harness.transaction('a1').status).toBe('applied');
+  });
+
+  it('leaves an undecided proposal alone when the next message is sent', async () => {
+    const harness = await withProposal();
+    // a1 arrives with a proposal and is never decided.
     expect(harness.controller().pendingCount).toBe(1);
 
     const undo = harness.bridge.undoPreview;
     undo.mockClear();
-    const results: Array<Awaited<ReturnType<PreviewController['settlePending']>>> = [];
-    await act(async () => {
-      results.push(await harness.controller().settlePending());
-    });
-    const settled = results[0];
+    // The next turn goes out with a1 still undecided. Nothing rolls it back:
+    // there is no settle step to roll it back with, and that is the whole
+    // point — moving on is not a decision.
+    await applyClean(harness, pairCompletion('a2', 'sess'));
     await settle();
 
     harness.render();
 
-    expect(settled?.rejected).toBe(1);
-    // Only the pending one is rolled back; the accepted one is left alone.
-    expect(undo).toHaveBeenCalledTimes(1);
-    expect(undo).toHaveBeenCalledWith('sess', harness.transaction('a2').id);
-    expect(harness.message('a2').decision).toBe('rejected');
-    expect(harness.message('a1').decision).toBe('accepted');
+    expect(undo).not.toHaveBeenCalled();
+    expect(harness.message('a1').decision).toBeUndefined();
+    expect(harness.message('a2').decision).toBeUndefined();
     expect(harness.transaction('a1').enabled).toBe(true);
-    expect(harness.transaction('a2').enabled).toBe(false);
-    expect(harness.controller().pendingCount).toBe(0);
+    expect(harness.transaction('a1').status).toBe('applied');
+    expect(harness.transaction('a2').enabled).toBe(true);
+    expect(harness.transaction('a2').status).toBe('applied');
+    expect(harness.controller().pendingCount).toBe(2);
   });
 
-  it('hands the caller the settled state the next prompt has to be built from', async () => {
-    // A session read after the commit would still be the pre-commit value, so
-    // the controller returns what it just wrote.
-    const harness = await withProposal();
-    const results: Array<Awaited<ReturnType<PreviewController['settlePending']>>> = [];
-    await act(async () => {
-      results.push(await harness.controller().settlePending());
-    });
-    const settled = results[0];
-    await settle();
-    harness.render();
-    expect(settled?.rejected).toBe(1);
-    expect(settled?.messages.find((m) => m.id === 'a1')?.decision).toBe('rejected');
-    expect(settled?.transactions.every((t) => t.enabled === false)).toBe(true);
-  });
-
-  it('settles nothing when there is no pending proposal', async () => {
+  it('leaves an accepted proposal alone when the next message is sent', async () => {
     const harness = await withProposal();
     await act(async () => {
       await harness.controller().decide('a1', 'accepted');
@@ -1440,15 +1478,11 @@ describe('proposal decisions', () => {
     harness.render();
     const undo = harness.bridge.undoPreview;
     undo.mockClear();
-    const results: Array<Awaited<ReturnType<PreviewController['settlePending']>>> = [];
-    await act(async () => {
-      results.push(await harness.controller().settlePending());
-    });
-    const settled = results[0];
+    await applyClean(harness, pairCompletion('a2', 'sess'));
     await settle();
     harness.render();
-    expect(settled?.rejected).toBe(0);
     expect(undo).not.toHaveBeenCalled();
+    expect(harness.transaction('a1').enabled).toBe(true);
   });
 
   it('keeps the change live and says so when the rollback fails', async () => {

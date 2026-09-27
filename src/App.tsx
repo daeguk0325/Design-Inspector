@@ -672,7 +672,6 @@ export default function App() {
                 streaming={chat.streaming}
                 previews={preview.previews}
                 onDecision={preview.decide}
-                onUndoPreview={(messageId) => void preview.undo(messageId)}
                 onCopy={(t) => void copyText(t, () => undefined)}
                 onCite={bridge.reselectSelection}
                 scrollRef={chatScrollRef}
@@ -774,12 +773,10 @@ export default function App() {
               setVisualNote(null);
               setRevertUndo(null);
               try {
-                // Settle before the prompt is built: an undecided proposal is
-                // rejected by the act of moving on, and the next request has to
-                // see that decision, not a still-pending preview.
-                const settled = await preview.settlePending();
-                const messages = settled?.messages ?? current.messages;
-                const transactions = settled?.transactions ?? current.previewTransactions;
+                // No settle step: an undecided proposal stays undecided. The
+                // change remains applied to the page and travels into the next
+                // request as a [pending] line, so the model can see what is on
+                // the page without being told the user agreed to it.
                 const prepared = await prepareVisualContext();
                 if (!prepared.ok) {
                   setVisualNote(VISUAL_REASON_TEXT[prepared.reason]);
@@ -794,11 +791,11 @@ export default function App() {
                   prepared.ok ? prepared.transmission : undefined,
                   appendMessage,
                   patchMessage,
-                  messages,
+                  current.messages,
                   ollamaBaseUrl,
                   sessionModel,
                   preview.applyCompletion,
-                  transactions,
+                  current.previewTransactions,
                   sessions.settings.generation,
                 );
               } catch (error) {

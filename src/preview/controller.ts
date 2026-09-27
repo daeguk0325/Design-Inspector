@@ -31,32 +31,17 @@ export interface PreviewController {
   /**
    * Accept keeps the applied change; Reject rolls it back. Either way the
    * decision is recorded so the next request carries it.
+   *
+   * A decision is reversible in both directions, so both of them touch the
+   * page: Accept re-applies a change that is not currently on it, rather than
+   * only ever confirming one that happens to be.
    */
   decide: (messageId: string, decision: DesignDecision) => Promise<void>;
-  /**
-   * Settles every still-pending proposal as rejected, rolling each one back.
-   *
-   * Called before each send: an undecided proposal is not something the user
-   * meant to keep, and the product says so. Accept/reject is opt-in, and moving
-   * on is a decision too.
-   *
-   * The settled messages and transactions are returned rather than re-read
-   * from the session. The caller builds the very next prompt from them, and a
-   * session read after the commit would still be the pre-commit value.
-   */
-  settlePending: () => Promise<SettledState | null>;
   /** Drops every transaction and rewinds the conversation to `userMessageId`. */
   revertTo: (userMessageId: string) => Promise<RevertSnapshot | null>;
   previews: ReadonlyMap<string, MessagePreviewStatus>;
   activeCount: number;
   pendingCount: number;
-}
-
-/** The session state a caller must use for the request that triggered a settle. */
-export interface SettledState {
-  rejected: number;
-  messages: ChatMessage[];
-  transactions: PreviewTransaction[];
 }
 
 /** Everything needed to put a rewind back the way it was. */
@@ -76,6 +61,17 @@ function resultStatus(result: PreviewResultPayload): PreviewRuntimeStatus {
 
 function transactionEnabled(status: PreviewRuntimeStatus): boolean {
   return status === 'applied' || status === 'pending-rebind' || status === 'unbound' || status === 'ambiguous';
+}
+
+/**
+ * Whether the change is on the live page right now.
+ *
+ * Both halves matter: `enabled` is the local record of the intent, and the
+ * status is what the target last reported. A transaction that claims to be
+ * applied while disabled was never re-asserted, so it counts as off the page.
+ */
+function appliedToPage(transaction: PreviewTransaction): boolean {
+  return transaction.enabled && transactionEnabled(transaction.status);
 }
 
 function undoSucceeded(result: PreviewResultPayload): boolean {
@@ -103,7 +99,11 @@ function previewChangesFor(completion: ChatCompletion): PreviewChangeRecord[] | 
     if (!citation || !anchor) return null;
     const declarations: Record<string, string> = {};
     for (const [property, value] of Object.entries(rule.declarations)) declarations[property] = value;
-    changes.push({ target: rule.target, anchor: { ...anchor }, declarations });
+    const change: PreviewChangeRecord = { target: rule.target, anchor: { ...anchor }, declarations };
+    if (rule.text !== undefined) change.text = rule.text;
+    if (rule.replaceText !== undefined) change.replaceText = rule.replaceText;
+    if (rule.element !== undefined) change.element = rule.element;
+    changes.push(change);
   }
   return changes;
 }
@@ -157,6 +157,9 @@ export function usePreviewController({ bridge, session, updateSession, autoEnabl
       const changes: PreviewAnchorChange[] = transaction.changes.map((change) => ({
         anchor: { ...change.anchor },
         declarations: { ...change.declarations },
+        ...(change.text === undefined ? {} : { text: change.text }),
+        ...(change.replaceText === undefined ? {} : { replaceText: change.replaceText }),
+        ...(change.element === undefined ? {} : { element: change.element }),
       }));
       const result = await active.applyPreview(ownerId, transaction.id, changes);
       const status = resultStatus(result);
@@ -280,21 +283,34 @@ export function usePreviewController({ bridge, session, updateSession, autoEnabl
     const transaction = current.previewTransactions.find(
       (item) => item.assistantId === messageId,
     );
-    if (transaction && transaction.enabled) {
-      // Accept is a no-op on the target: the change is already applied and
-      // stays applied. Reject is the only outcome that touches the page.
-      if (decision === 'rejected') {
-        try {
-          const result = await bridgeRef.current.undoPreview(ownerId, transaction.id);
-          if (undoSucceeded(result)) {
-            patchTransaction(ownerId, transaction.id, { status: 'undone', enabled: false });
-          } else {
-            patchTransaction(ownerId, transaction.id, { errorCode: 'undo-failed' });
-          }
-        } catch {
+    // Both directions touch the page, because both directions are reversible.
+    // The user decides by looking at the page, so flipping a decision has to
+    // change what the page shows; recording the word alone would leave the
+    // preview contradicting the decision it just recorded.
+    if (transaction && decision === 'rejected' && transaction.enabled) {
+      try {
+        const result = await bridgeRef.current.undoPreview(ownerId, transaction.id);
+        if (undoSucceeded(result)) {
+          patchTransaction(ownerId, transaction.id, { status: 'undone', enabled: false });
+        } else {
           patchTransaction(ownerId, transaction.id, { errorCode: 'undo-failed' });
         }
+      } catch {
+        patchTransaction(ownerId, transaction.id, { errorCode: 'undo-failed' });
       }
+    } else if (transaction && decision === 'accepted' && !appliedToPage(transaction)) {
+      // The re-apply is handed a transaction that is enabled and live rather
+      // than the one read here: `applyTransaction` refuses anything else, and
+      // after a reject the stored transaction is `undone`/disabled. The session
+      // read above cannot be used for that check because the reject has not
+      // committed yet in the case where both happen in quick succession.
+      //
+      // `claimScope` is deliberately not consulted. It exists to stop the
+      // automatic rebind effect from double-applying a scope, and a deliberate
+      // user-driven re-apply is exactly what it is meant to refuse; the
+      // `inFlight` guard inside `applyTransaction` is the protection that
+      // belongs to a direct call.
+      await applyTransaction(ownerId, { ...transaction, enabled: true, status: 'pending-rebind' });
     }
     markDecision(ownerId, (existing) => ({
       ...existing,
@@ -303,51 +319,7 @@ export function usePreviewController({ bridge, session, updateSession, autoEnabl
       ),
       updatedAt: Date.now(),
     }));
-  }, [patchTransaction, session]);
-
-  const settlePending = useCallback(async (): Promise<SettledState | null> => {
-    const current = sessionRef.current;
-    if (!session || !current || current.id !== session.id) return null;
-    const ownerId = current.id;
-    const pending = pendingForSession(current).filter((proposal) => {
-      const transaction = current.previewTransactions.find(
-        (item) => item.id === proposal.transactionId,
-      );
-      return transaction?.enabled === true;
-    });
-    if (pending.length === 0) return { rejected: 0, messages: current.messages, transactions: current.previewTransactions };
-    // Newest first: later transactions layer on top of earlier ones, so
-    // undoing in reverse leaves the earlier changes standing until their turn.
-    const ordered = [...pending].sort((a, b) => b.order - a.order);
-    const rolledBack = new Set<string>();
-    for (const proposal of ordered) {
-      try {
-        await bridgeRef.current.undoPreview(ownerId, proposal.transactionId);
-      } catch {
-        // A failed rollback still counts as rejected: the user did not keep it,
-        // and the local record must not claim it is applied.
-      }
-      rolledBack.add(proposal.transactionId);
-    }
-    const rejectedIds = new Set(ordered.map((proposal) => proposal.messageId));
-    const messages = current.messages.map((message) =>
-      message.decision === undefined && rejectedIds.has(message.id)
-        ? { ...message, decision: 'rejected' as DesignDecision }
-        : message,
-    );
-    const transactions = current.previewTransactions.map((transaction) =>
-      rolledBack.has(transaction.id)
-        ? { ...transaction, status: 'undone' as PreviewRuntimeStatus, enabled: false, updatedAt: Date.now() }
-        : transaction,
-    );
-    updateSessionRef.current(ownerId, (existing) => ({
-      ...existing,
-      messages,
-      previewTransactions: transactions,
-      updatedAt: Date.now(),
-    }));
-    return { rejected: ordered.length, messages, transactions };
-  }, [session]);
+  }, [applyTransaction, patchTransaction, session]);
 
   const revertTo = useCallback(async (userMessageId: string): Promise<RevertSnapshot | null> => {
     const current = sessionRef.current;
@@ -421,5 +393,5 @@ export function usePreviewController({ bridge, session, updateSession, autoEnabl
     [session],
   );
 
-  return { applyCompletion, undo, reset, decide, settlePending, revertTo, previews, activeCount, pendingCount };
+  return { applyCompletion, undo, reset, decide, revertTo, previews, activeCount, pendingCount };
 }

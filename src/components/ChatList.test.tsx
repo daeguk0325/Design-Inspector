@@ -1,8 +1,9 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ReactNode } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import type { CitationSnapshot, ChatMessage } from '../state/models.ts';
+import type { DesignDecision } from '../preview/transaction.ts';
 import { ChatList, type MessagePreviewStatus } from './ChatList.tsx';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -230,7 +231,6 @@ describe('ChatList message actions', () => {
         onCopy={onCopy}
         onRevert={onRevert}
         onDecision={vi.fn()}
-        onUndoPreview={vi.fn()}
         previews={{ m1: { status: 'applied' } }}
       />,
     );
@@ -246,26 +246,49 @@ describe('ChatList message actions', () => {
     expect(rewind).not.toBeNull();
     click(rewind);
     expect(onRevert).toHaveBeenCalledWith(user);
+    // The Accept/Reject toggle is the only rollback affordance, so there is no
+    // separate undo control to reach for.
+    expect(container.querySelector('.preview-undo')).toBeNull();
     vi.useRealTimers();
   });
 });
 
 describe('ChatList decision controls', () => {
-  it('offers only Accept and Reject, and never Revise', () => {
-    const onDecision = vi.fn();
+  function renderPreview(
+    preview: MessagePreviewStatus,
+    decision: ChatMessage['decision'] = undefined,
+    onDecision: Mock<(messageId: string, decision: DesignDecision) => void> = vi.fn(),
+  ): { container: HTMLElement; onDecision: Mock<(messageId: string, decision: DesignDecision) => void> } {
     const container = mount(
       <ChatList
-        messages={[message({ id: 'a1', role: 'assistant', content: 'Done' })]}
+        messages={[message({ id: 'a1', role: 'assistant', content: 'Done', decision })]}
         streaming={false}
         onCopy={vi.fn()}
         onRevert={vi.fn()}
         onDecision={onDecision}
-        previews={{ a1: { status: 'applied', proposalState: 'pending', summaryLines: ['PrimaryButton: padding 12px'] } }}
+        previews={{ a1: preview }}
       />,
+    );
+    return { container, onDecision };
+  }
+
+  const pending = (overrides: Partial<MessagePreviewStatus> = {}): MessagePreviewStatus => ({
+    status: 'applied',
+    proposalState: 'pending',
+    summaryLines: ['PrimaryButton: padding 12px'],
+    ...overrides,
+  });
+
+  it('offers only Accept and Reject, and never Revise', () => {
+    const { container, onDecision } = renderPreview(
+      pending({ summaryLines: ['PrimaryButton: padding 12px'] }),
     );
 
     const group = container.querySelector('.msg.assistant .decide');
     expect(group?.getAttribute('role')).toBe('group');
+    // The group names what it flips, so a screen reader is not left reading two
+    // buttons called Accept and Reject with no subject.
+    expect(group?.getAttribute('aria-label')).toBe("This answer's previewed change");
     const accepted = group?.querySelector<HTMLElement>('[data-decision="accepted"]');
     const reject = group?.querySelector<HTMLElement>('[data-decision="rejected"]');
     expect(accepted).not.toBeNull();
@@ -273,64 +296,88 @@ describe('ChatList decision controls', () => {
     // Revise was a state with no behaviour behind it.
     expect(group?.querySelector('[data-decision="needs-revision"]')).toBeNull();
     expect(group?.querySelectorAll('button')).toHaveLength(2);
-    expect(accepted?.getAttribute('aria-pressed')).toBe('false');
 
     click(accepted);
     click(reject);
     expect(onDecision.mock.calls).toEqual([['a1', 'accepted'], ['a1', 'rejected']]);
   });
 
-  it('shows the change under review and says an undecided one is waiting', () => {
-    const container = mount(
-      <ChatList
-        messages={[message({ id: 'a1', role: 'assistant', content: 'Done' })]}
-        streaming={false}
-        onCopy={vi.fn()}
-        onRevert={vi.fn()}
-        onDecision={vi.fn()}
-        previews={{ a1: { status: 'applied', proposalState: 'pending', summaryLines: ['PrimaryButton: padding 12px', 'PrimaryButton: gap 8px'] } }}
-      />,
-    );
-    const proposal = container.querySelector('.msg.assistant .proposal');
-    expect(proposal?.getAttribute('data-state')).toBe('pending');
-    expect(proposal?.textContent).toContain('Waiting for you');
-    expect(proposal?.textContent).toContain('PrimaryButton: padding 12px');
-    expect(proposal?.textContent).toContain('PrimaryButton: gap 8px');
-    expect(proposal?.textContent).toContain('Send the next message to roll this back.');
+  it('reads Accept before the user has decided anything', () => {
+    // The change is already on the page when the answer streams out, so the
+    // toggle starts on Accept. Nothing has to be confirmed to see the change.
+    const { container } = renderPreview(pending());
+    const accepted = container.querySelector('.decide-btn[data-decision="accepted"]');
+    const reject = container.querySelector('.decide-btn[data-decision="rejected"]');
+    expect(accepted?.getAttribute('aria-pressed')).toBe('true');
+    expect(reject?.getAttribute('aria-pressed')).toBe('false');
   });
 
-  it('reports a settled proposal and takes the buttons away', () => {
-    for (const [state, label] of [['accepted', 'Kept'], ['rejected', 'Rolled back']] as const) {
-      const container = mount(
-        <ChatList
-          messages={[message({ id: 'a1', role: 'assistant', content: 'Done', decision: state })]}
-          streaming={false}
-          onCopy={vi.fn()}
-          onRevert={vi.fn()}
-          onDecision={vi.fn()}
-          previews={{ a1: { status: 'applied', proposalState: state, summaryLines: ['PrimaryButton: padding 12px'] } }}
-        />,
-      );
-      expect(container.querySelector('.proposal')?.getAttribute('data-state')).toBe(state);
-      expect(container.querySelector('.proposal')?.textContent).toContain(label);
-      // A decided proposal is final; re-deciding it is not offered.
-      expect(container.querySelectorAll('.decide')).toHaveLength(0);
-    }
+  it('names the change on the left with the lines the next request carries', () => {
+    const { container } = renderPreview(
+      pending({ summaryLines: ['PrimaryButton: padding 12px 16px', 'PrimaryButton: border-radius 10px'] }),
+    );
+
+    const row = container.querySelector('.msg.assistant .preview-row');
+    expect(row).not.toBeNull();
+    const changes = [...container.querySelectorAll('.preview-change')].map((n) => n.textContent);
+    expect(changes).toEqual(['PrimaryButton: padding 12px 16px', 'PrimaryButton: border-radius 10px']);
+    // One row: the summary, then the toggle, and none of the old furniture.
+    expect(row?.firstElementChild?.classList.contains('preview-state')).toBe(true);
+    expect(row?.lastElementChild?.classList.contains('decide')).toBe(true);
+    expect(container.querySelectorAll('.preview-row')).toHaveLength(1);
+    expect(container.querySelector('.proposal')).toBeNull();
+    expect(container.querySelector('.proposal-state')).toBeNull();
+    expect(container.querySelector('.proposal-note')).toBeNull();
+    expect(container.textContent).not.toContain('Waiting for you');
+    expect(container.textContent).not.toContain('Live target');
+    expect(container.querySelector('.preview-undo')).toBeNull();
+  });
+
+  it('keeps both halves of the toggle after a decision, so the mind can change', () => {
+    const onDecision = vi.fn();
+    const { container } = renderPreview(pending({ proposalState: 'rejected' }), 'rejected', onDecision);
+
+    const group = container.querySelector('.msg.assistant .decide');
+    const accepted = group?.querySelector<HTMLElement>('[data-decision="accepted"]');
+    const reject = group?.querySelector<HTMLElement>('[data-decision="rejected"]');
+    expect(accepted?.getAttribute('aria-pressed')).toBe('false');
+    expect(reject?.getAttribute('aria-pressed')).toBe('true');
+    // Flip-back stays reachable: a recorded decision is not a final one.
+    click(accepted);
+    expect(onDecision).toHaveBeenCalledWith('a1', 'accepted');
+
+    const { container: acceptedRow } = renderPreview(
+      pending({ proposalState: 'accepted', summaryLines: ['Card: gap 8px'] }),
+      'accepted',
+    );
+    expect(acceptedRow.querySelector('.decide-btn[data-decision="accepted"]')?.getAttribute('aria-pressed'))
+      .toBe('true');
+    expect(acceptedRow.textContent).toContain('Card: gap 8px');
+  });
+
+  it('says so in the same row when the preview failed', () => {
+    const { container } = renderPreview(
+      pending({ status: 'rejected', errorCode: 'anchor-missing' }),
+    );
+    const state = container.querySelector('.msg.assistant .preview-state');
+    expect(state?.getAttribute('data-state')).toBe('rejected');
+    // A failure that read like a clean row is the one thing this row must not do.
+    expect(state?.textContent).toContain('Not applied');
+    expect(state?.textContent).toContain('anchor-missing');
+    expect(state?.textContent).toContain('PrimaryButton: padding 12px');
+    expect(container.querySelectorAll('.preview-row')).toHaveLength(1);
+  });
+
+  it('still says so when a failure left no change to name', () => {
+    const { container } = renderPreview({ status: 'rejected', errorCode: 'anchor-missing' });
+    expect(container.querySelector('.preview-row')).not.toBeNull();
+    expect(container.querySelector('.preview-error')?.textContent).toBe('Not applied · anchor-missing');
   });
 
   it('offers no decision for an answer that proposed nothing', () => {
-    const container = mount(
-      <ChatList
-        messages={[message({ id: 'a1', role: 'assistant', content: 'Done' })]}
-        streaming={false}
-        onCopy={vi.fn()}
-        onRevert={vi.fn()}
-        onDecision={vi.fn()}
-        previews={{ a1: { status: 'applied' } }}
-      />,
-    );
+    const { container } = renderPreview({ status: 'applied' });
     expect(container.querySelectorAll('.decide')).toHaveLength(0);
-    expect(container.querySelector('.proposal')).toBeNull();
+    expect(container.querySelector('.preview-row')).toBeNull();
   });
 
   it('is absent without a handler and on user messages', () => {
@@ -349,10 +396,9 @@ describe('ChatList decision controls', () => {
 describe('ChatList preview state', () => {
   const assistant = message({ id: 'a1', role: 'assistant', content: 'Applied' });
 
-  it('shows status, the live-target label, and an enabled undo', () => {
-    const onUndoPreview = vi.fn();
+  it('says a change that is not on the page, and no live-target badge', () => {
     const previews = new Map<string, MessagePreviewStatus>([
-      ['a1', { status: 'applied', enabled: true, changeCount: 2 }],
+      ['a1', { status: 'applied', enabled: true, changeCount: 2, summaryLines: ['Card: gap 8px'] }],
     ]);
     const container = mount(
       <ChatList
@@ -361,28 +407,24 @@ describe('ChatList preview state', () => {
         onCopy={vi.fn()}
         onRevert={vi.fn()}
         previews={previews}
-        onUndoPreview={onUndoPreview}
+        onDecision={vi.fn()}
       />,
     );
 
     const state = container.querySelector('.msg.assistant .preview-state');
     expect(state?.getAttribute('data-state')).toBe('applied');
-    expect(state?.textContent).toContain('Applied');
-    expect(state?.textContent).toContain('2 changes');
-    const diff = container.querySelector('.preview-diff');
-    expect(diff?.getAttribute('aria-label')).toBe('Applied to the live target');
-    expect(diff?.querySelectorAll('.preview-slot')).toHaveLength(1);
-    expect(diff?.textContent).toBe('Live target');
-
-    const undo = container.querySelector<HTMLButtonElement>('.preview-undo');
-    expect(undo?.disabled).toBe(false);
-    click(undo);
-    expect(onUndoPreview).toHaveBeenCalledWith('a1');
+    expect(state?.textContent).toContain('Card: gap 8px');
+    // An applied change needs no status word: the toggle beside it already says
+    // the change is kept, and the badge named nothing the user could act on.
+    expect(state?.textContent).not.toContain('Applied');
+    expect(container.querySelector('.preview-diff')).toBeNull();
+    expect(container.textContent).not.toContain('Live target');
+    expect(container.querySelector('.preview-undo')).toBeNull();
   });
 
-  it('disables undo when nothing is applied and honours record lookups', () => {
+  it('reports a status that is not applied and honours record lookups', () => {
     const previews: Readonly<Record<string, MessagePreviewStatus>> = {
-      a1: { status: 'undone', errorCode: 'anchor-missing' },
+      a1: { status: 'ambiguous', summaryLines: ['Card: gap 8px'] },
     };
     const container = mount(
       <ChatList
@@ -391,13 +433,12 @@ describe('ChatList preview state', () => {
         onCopy={vi.fn()}
         onRevert={vi.fn()}
         previews={previews}
-        onUndoPreview={vi.fn()}
       />,
     );
     const state = container.querySelector('.preview-state');
-    expect(state?.getAttribute('data-state')).toBe('undone');
-    expect(state?.getAttribute('title')).toContain('anchor-missing');
-    expect(container.querySelector<HTMLButtonElement>('.preview-undo')?.disabled).toBe(true);
+    expect(state?.getAttribute('data-state')).toBe('ambiguous');
+    expect(state?.textContent).toContain('Ambiguous match');
+    expect(state?.textContent).toContain('Card: gap 8px');
   });
 
   it('renders preview state only for the message that owns it', () => {
@@ -480,9 +521,47 @@ describe('ChatList streaming motion', () => {
         onRevert={vi.fn()}
       />,
     );
-    expect(container.querySelector('.typing-dots')).not.toBeNull();
-    expect(container.querySelector('.typing-label')?.textContent).toContain('답변 작성 중');
-    expect(container.querySelector('.status-note .spin')).not.toBeNull();
+    // The ring and the dots are the whole signal now. The words that used to
+    // sit beside them were a second copy of the same status, and the bubble
+    // already carries the motion, so nothing repeats it.
+    expect(container.querySelector('.bubble .spin')).not.toBeNull();
+    expect(container.querySelector('.bubble .typing-dots')).not.toBeNull();
+    expect(container.querySelector('.typing-label')).toBeNull();
+    expect(container.textContent).not.toContain('답변 작성 중');
+  });
+
+  it('keeps one set of motion when the bubble is still empty', () => {
+    const container = mount(
+      <ChatList
+        messages={[message({ id: 'a1', role: 'assistant', content: '', status: 'streaming' })]}
+        streaming
+        onCopy={vi.fn()}
+        onRevert={vi.fn()}
+      />,
+    );
+    // The status line would be the same ring and the same dots again, so it is
+    // suppressed while the bubble is empty.
+    expect(container.querySelector('.status-note')).toBeNull();
+    expect(container.querySelectorAll('.spin')).toHaveLength(1);
+    expect(container.querySelectorAll('.typing-dots')).toHaveLength(1);
+  });
+
+  it('moves the ring and the dots into the status line once the bubble has text', () => {
+    const container = mount(
+      <ChatList
+        messages={[message({ id: 'a1', role: 'assistant', content: 'half an', status: 'streaming' })]}
+        streaming
+        onCopy={vi.fn()}
+        onRevert={vi.fn()}
+      />,
+    );
+    // The bubble cannot hold the motion once a partial answer is in it, so it
+    // moves rather than appearing twice.
+    expect(container.querySelector('.bubble .spin')).toBeNull();
+    expect(container.querySelectorAll('.status-live .spin')).toHaveLength(1);
+    expect(container.querySelectorAll('.status-live .typing-dots')).toHaveLength(1);
+    expect(container.querySelectorAll('.spin')).toHaveLength(1);
+    expect(container.querySelectorAll('.typing-dots')).toHaveLength(1);
   });
 
   it('keeps a blinking caret at the end of a partial answer', () => {

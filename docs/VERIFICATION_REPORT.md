@@ -47,22 +47,24 @@ failures they uncovered are in
 | Controlled composer document | `src/editor/composerTyping.test.tsx` (22) | PASS — tags interleave with text in a **single block** at the caret, not at the front; a second tag lands beside the first without reordering it; no leading newline; a locally removed tag is restored when the authoritative list still contains it and dropped when it shrinks; visual placeholder hidden while tags exist; a held Backspace is never a confirmation and a drag that swallows a tag deletes it with no arm step; Ctrl+Z restores the tag and asks the target to re-select; long text keeps one block; adjacency resolves at either tag edge only; a reconcile that removes merges into one history entry and one that inserts does not |
 | Plain text composition | `src/editor/plainText.test.ts` (10) | PASS — reference rendered where the tag was written, sentence order kept, spacing around words and between references, leading tags stay leading, name fallback before a number exists, unknown tag dropped, newlines preserved, typed-only text for the send gate |
 | Composer lifecycle | `src/components/Composer.test.tsx` (11) | PASS — send gating, stop-instead-of-send, clears tags only on success, count is derived from the tag list alone (never a second counter), inline notice + tag restore when the target refuses the deselect, a tag is sent as `({1})` and never as its selection id, tags alone leave the gate shut |
-| Chat list / decisions | `src/components/ChatList.test.tsx` (17) | PASS — each `({n})` rendered as an inline chip where it was written, no tag row under a user bubble, citation row kept on an assistant message, a marker in an answer becomes a chip that re-selects, an unresolvable marker left as text in both roles, parenthesised numbering left as text, no image bytes, element-key/file/mode fallbacks, empty request, raw copy, accept/revise/reject, preview status + undo affordance, empty state |
+| Chat list / decisions | `src/components/ChatList.test.tsx` (32) | PASS — each `({n})` rendered as an inline chip where it was written, no tag row under a user bubble, citation row kept on an assistant message, a marker in an answer becomes a chip that re-selects, an unresolvable marker left as text in both roles, parenthesised numbering left as text, no image bytes, element-key/file/mode fallbacks, empty request, raw copy, **one collapsed preview row** (change summary + a two-button Accept/Reject toggle, defaulting to Accept because the change is already applied, never removed once a decision is recorded, no `Live target` badge, no `Undo` button, no `Kept`/`Rolled back` state box, no "send the next message to roll this back" note), a failed or unbound preview still says so inline, **streaming motion is exactly one ring and one set of dots per message with no text label** — the empty bubble carries them and the status line stays absent, the partially-answered message moves them to the status line — and the reasoning log plus reduced-motion cases |
+| Proposal panel | `src/components/ProposalPanel.test.tsx` (13) | PASS — change-log grouping, and the pending copy now states that a pending proposal survives the next request rather than being auto-reverted |
 | Header (viewport, reset) | `src/components/Header.test.tsx` (7) | PASS — Desktop/Tablet/Mobile presets, reset-all-previews, bridge state display |
 | Component details | `src/components/ComponentDetails.test.tsx` (15) | PASS — safe text rendering, style facts grouped under Color/Typography/Box/Layout/Motion in group order, hex swatches only (an `rgb()` value renders as text with no swatch), an injected label or `<img`-bearing value dropped rather than rendered, a property outside the allowlist renders no style section, existing detail rows unchanged |
 | Style facts (Bridge) | `src/protocol/vera-inspector-style-facts.test.ts` (24) | PASS — per-property defaults omitted (`display:block`, `rgba(0,0,0,0)`), zero margin/border-width omitted while zero **padding** is kept, `oklch()` and `color(srgb …)` converted to `#rrggbb` through the canvas, a transparent paint reported as `transparent`, no canvas → value dropped rather than passed through, black-sentinel readback refused, 120-char cap + control-character stripping, viewport geometry + aria-label + 3-level ancestor chain stopping at `body` + tag name, non-allowlisted property never emitted. Every test stubs `getComputedStyle`: jsdom returns `''` for most longhands, so an unstubbed test would pass while measuring nothing |
 | Style facts (app) | `src/style/sanitize.test.ts` (23) | PASS — unknown property or top-level key refuses the whole record, control characters stripped and values bounded, malformed geometry/ancestors rejected, fractional geometry rounded, per-record storage budget enforced, citation-marked prompt block with four→one and symmetric-pair box collapsing, zero padding omitted from `box=`, a label reading like an instruction kept as inert quoted data, over-budget records drop whole groups (colour survives, motion does not) and still emit the marker |
 | Style facts (wire) | `src/protocol/validate.test.ts` (+11, 56 total) | PASS — partial key set accepted (`hasExactKeys` would reject it, since the Bridge omits defaults), unknown property incl. `__proto__`/`constructor` rejected, 120-char value bound enforced on both sides, 57 properties rejected, unknown top-level key rejected, manipulated `props` container rejected, geometry missing/extra/negative/fractional/string rejected, over-long label and malformed tag name rejected, ancestor chain over 3 or non-`tag[.class]` rejected |
-| Style facts (end to end) | `src/protocol/vera-inspector-bridge-runtime.test.ts` (+3, 33 total) | PASS — facts on a real `VERA_INSPECTOR_SELECTION` payload pass `contractFailures()`, i.e. the app-side validator accepts what the Bridge emits; facts dropped on a route change with no cache to go stale; omitted for a non-HTML mode |
-| Transmission prompt | `src/ollama/client.test.ts` (+12, 21 total) | PASS — facts block present with **and** without an image, placed before the image block, per-record `({n})` numbering in order, omitted when no citation carries facts, an injected value stays inside the fenced evidence block and never becomes a section header, cloud forwarding disclosed exactly once and never mentioned for a local model, the no-image fact stated once rather than per citation, narrow-question focus routing with keyword dedupe, user request still last |
+| Style facts (end to end) | `src/protocol/vera-inspector-bridge-runtime.test.ts` (67) | PASS — facts on a real `VERA_INSPECTOR_SELECTION` payload pass `contractFailures()`, i.e. the app-side validator accepts what the Bridge emits; facts dropped on a route change with no cache to go stale; omitted for a non-HTML mode |
+| Transmission prompt | `src/ollama/client.test.ts` (52) | PASS — facts block present with **and** without an image, placed before the image block, per-record `({n})` numbering in order, omitted when no citation carries facts, an injected value stays inside the fenced evidence block and never becomes a section header, cloud forwarding disclosed exactly once and never mentioned for a local model, the no-image fact stated once rather than per citation, narrow-question focus routing with keyword dedupe, user request still last, **v2 operation vocabulary taught** (block version 2, each of `text` / `replaceText` / `element` and when to pick it, and an explicit instruction that `color: transparent` / `font-size: 0` only *hide* text and are not the way to remove it), **a `[pending]` decision line reaches the prompt** and the header reads "Changes on the page in this session", **the stage-one route line is injected** and never appears in visible output |
 | Export isolation | `src/export/serialize.test.ts` (+1, 8 total) | PASS — measured style values, labels and the `styleFacts` key never reach the copyable agent prompt |
 | Bridge hook | `src/hooks/useBridge.test.ts` (16) | PASS — handshake retry, nonpersisted session binding, fresh-snapshot gate, handshake recovery, session reset, capture correlation, route epoch, preview request correlation, confirmed deselect (resolves true on a snapshot without the selection, false on timeout or when not ready), reselect posts the command and the tray follows the bridge's echoed record |
-| Chat hook | `src/hooks/useChat.test.ts` (13) | PASS — sanitized streaming, sidecar extraction, preview callback on clean completion, the request citations stored on the answer (and on a retried answer) so its markers resolve, stop/retry/interruption, late-token session guard |
-| Preview CSS policy | `src/preview/cssPolicy.test.ts` (18) | PASS — visual-only allowlist, denied display/flex/grid, denied javascript:/url(), value bounds, per-rule cap |
-| Preview contract | `src/preview/contract.test.ts` (15) | PASS — selectorId mapping, declaration normalization, multi-target payloads, invalid shape rejection |
-| Preview sidecar parser | `src/preview/sidecar.test.ts` (25) | PASS — split tokens, tagged block extraction, truncation, oversized, non-JSON, multi-block, stray text |
-| Preview controller | `src/preview/controller.test.tsx` (59) | PASS — auto apply on clean completion, skip on error/stop/disabled, atomic multi-layer, Undo, Reset, duplicate suppression, decision persistence, route rebind (unbound/ambiguous), suspend while disabled |
-| Bridge preview runtime | `src/protocol/vera-inspector-bridge-runtime.test.ts` (30) | PASS — style layer add/remove, anchor rebind, route epoch, session reset, runtime only (no source write), reselect re-activates a deselected record under the same id, ignores an unknown id, and declines a record whose element left the page |
+| Chat hook | `src/hooks/useChat.test.ts` (23) | PASS — sanitized streaming, sidecar extraction, preview callback on clean completion, the request citations stored on the answer (and on a retried answer) so its markers resolve, stop/retry/interruption, late-token session guard, **stage-one routing** (the classifier runs before the main completion on the request text alone, its line reaches the main prompt, a `null` verdict changes nothing, and the route line never appears in visible text) |
+| Preview CSS policy | `src/preview/cssPolicy.test.ts` (18) | PASS — visual-only allowlist, denied display/flex/grid, denied javascript:/url(), value bounds, per-rule cap. The `display`/`visibility` denylist is unchanged in v2 on purpose: `element: "hide"` is the deliberate operation, and nothing was widened to reach it |
+| Preview contract | `src/preview/contract.test.ts` (20) | PASS — selectorId mapping, declaration normalization, multi-target payloads, invalid shape rejection, **v2 operations** (`text: "clear"`, `replaceText`, `element: "hide"/"remove"`), at-least-one-operation required, `text`+`replaceText` refused together, a rule with no operation refused, v1 still accepted |
+| Preview sidecar parser | `src/preview/sidecar.test.ts` (40) | PASS — split tokens, tagged block extraction, truncation, oversized, non-JSON, multi-block, stray text |
+| Preview controller | `src/preview/controller.test.tsx` (72) | PASS — auto apply on clean completion, skip on error/stop/disabled, atomic multi-layer, Undo, Reset, duplicate suppression, decision persistence, route rebind (unbound/ambiguous), suspend while disabled, **reversible decision** (Accept re-applies a change that is not on the page, bypassing `claimScope` and still applied exactly once by the rebind effect), **no auto-settle on send** (an undecided proposal survives a further turn, and an accepted one is not rolled back) |
+| Bridge preview runtime | `src/protocol/vera-inspector-bridge-runtime.test.ts` (67) | PASS — style layer add/remove, anchor rebind, route epoch, session reset, runtime only (no source write), reselect re-activates a deselected record under the same id, ignores an unknown id, declines a record whose element left the page, **v2 operations (23 new)**: `text:"clear"` removes only direct text children and leaves child elements and their identity intact; interleaved text runs restore in original order; `replaceText` round-trips; `element:"hide"` goes through the layer and restores; `element:"remove"` re-inserts at the original index; apply-twice/undo-twice is stable; every invalid value is rejected and changes nothing; unknown key refused; no-operation rule refused; duplicate targets refused; teardown with a detached parent neither throws nor resurrects. Each undo asserts `domShape` equality with the pre-apply snapshot |
+| Stage-one router | `src/ollama/route.test.ts` (14) | PASS — text-only input with no images/facts/history, reasoning off, 12-token cap, own deadline, abort; strict parse (a wordy answer is no verdict); every failure mode returns `null`; **`null` is total, including a malformed request object and a `null`/`undefined` request, whose `finally` block would otherwise replace the `catch`'s `null` with a rejected promise**; the router may subtract a block but never add one; a `CHANGE` verdict on a gated request still yields an `ANSWER` line |
 | Capture hardening | `src/protocol/vera-inspector-capture.test.ts` (8) | PASS — queue, timeout, safe error codes, modern-CSS sanitized retry, SVG/canvas direct raster, metadata-only fallback |
 
 ## Live E2E evidence (real processes, 2026-09-26)
@@ -398,6 +400,111 @@ behaviour: a ratio is not a thing you read off a hex pair, you compute it.
   sheet cells showed component 1. `useBridge` keys pending captures by
   `requestId` for exactly this reason.
 
+
+## Live verification of contract v2 and the reversible toggle (2026-09-27)
+
+Model `hf.co/TaichuAI/ZDTaichu5.0-9B-GGUF:Q8_0`, real Chrome over CDP, real
+target (`vera-universal-board` on :3000 through the project's own supervisor and
+target proxy), nothing stubbed.
+
+### The 9B learned the new operations
+
+Driven with the app's own `DESIGN_INSPECTOR_SYSTEM_PROMPT` and a real font-only
+text element as the citation. Seven phrasings, three of them about removing text:
+
+| request                        | emitted                        | operation               |
+| ------------------------------ | ------------------------------ | ----------------------- |
+| `이거 글 없애줘`                 | `{"version":2,…,"text":"clear"}` | `text: clear`         |
+| `이 컴포넌트의 글자를 지워줘`      | `{"version":2,…,"text":"clear"}` | `text: clear`         |
+| `이거 비워줘`                    | `{"version":2,…,"text":"clear"}` | `text: clear`         |
+| `이거 글 안 보이게 해줘`           | —                              | —                       |
+| `이 컴포넌트 삭제해줘`             | —                              | —                       |
+| `이거 글자색 빨간색으로 바꿔줘`     | `{"version":2,…,"declarations":{"color":"red"}}` | `declarations` |
+| `이 컴포넌트 어때?`               | —                              | —                       |
+
+6 of 7 emitted a block; **3 of 3 blocks that were a text request carried
+`text:"clear"`**, and the question carried none. Every block was `version: 2`. The
+style request still uses `declarations`, so v1 behaviour was not regressed.
+
+This is the fix for the reported failure. Before v2, the same 9B asked to remove
+the text of three font-only components dumped the component facts and changed
+nothing, because `declarations` had no way to say "remove". A separate real-browser
+run captured its reasoning first: *"I should use the `text`=`clear` operation in the
+design block … the rule would be: `{"target":1,"text":"clear"}`"* — it had the
+operation available and reasoned correctly about it, and the run still emitted no
+block because the click had bound a different element (see limitations).
+
+The two misses are real and are not explained away: `이거 글 안 보이게 해줘` ("make
+the text not visible") and `이 컴포넌트 삭제해줘` ("delete this component") both
+produced nothing. The prompt states that `element: "hide"` and `element: "remove"`
+exist, but a 9B did not reach for them on those phrasings. Coverage of the
+vocabulary is not complete.
+
+### Fence shapes the real 9B wrote
+
+Captured from the six blocks above and pushed through the real sidecar in 7-byte
+pieces, the way a token stream arrives:
+
+| shape                                                       | parsed |
+| ----------------------------------------------------------- | ------ |
+| exact tag, prose before                                      | PASS   |
+| exact tag, `text: "clear"`                                   | PASS   |
+| exact tag, `border-radius`                                   | PASS   |
+| exact tag, `padding`                                         | PASS   |
+| exact tag, `rgb()` colour                                    | PASS   |
+| bare fence, tag on the next line                             | PASS   |
+| **`design-insector-preview`** — one letter out                | PASS   |
+
+The last one is a real 9B slip, and it is the case §6b's two-edit tolerance exists
+for. Trailing prose after the closing fence is rejected by design (the contract
+requires whitespace only), which is behaviour, not a miss.
+
+One shape is **not** handled: the info string split across a line break
+(```` ```design-inspec ```` / `tor-preview`) prints the payload as visible text. No
+run produced it, so it was left alone rather than papered over — widening fence
+recognition for a shape with no evidence behind it would risk swallowing an
+ordinary code block that happens to start with those letters.
+
+### The decision layer, in the live UI
+
+From the browser run:
+
+- **Row collapsed.** One `.preview-row`, two `.decide-btn`, and zero
+  `.preview-slot` / `.preview-undo` / `.proposal-state` / `.proposal-note` /
+  `.proposal`. Row text: `div: Accept Reject`.
+- **Toggle defaults to Accept**, matching the change already being applied.
+- **The toggle is reversible.** `aria-pressed` went `accepted=true` →
+  `rejected=true` → `accepted=true` across three real clicks. The Accept direction
+  re-applies rather than no-op'ing.
+- **A pending proposal survives the next turn.** After a second real turn, the
+  first row still read `accepted=true`. Nothing was auto-rejected.
+- **The route line reached the model**: `Route: CHANGE — the user asked for a
+  change to the page.` was present in the request body.
+- **Zero console errors, zero exceptions, zero page errors** across the run.
+
+### What this run did not prove
+
+Honest gaps, in the order they matter:
+
+1. **The model's block mutating the live DOM through the real bridge, end to end,
+   was not observed in a browser.** The click fixture kept binding the wrong
+   element: the target page carries a fixed cookie-consent banner across the top
+   and a full-width `canvas` over the content area, and both beat a probe element
+   to the hit test. The app reported the selection as `canvas`. With correct facts
+   the 9B does emit `text:"clear"` (above), and the bridge applies and restores it
+   against real DOM in the runtime suite, but the *composition* of the two was not
+   run in one browser session.
+2. **A full four-image turn exceeded the 14-minute harness timeout.** The stage-one
+   router is cheap (median 97 ms, text-only), but the main completion with the
+   contact sheet and crops on CPU is the wall. This is the pre-existing latency
+   characteristic, not a regression, and it is what makes a browser round-trip
+   expensive to iterate on.
+3. **The bridge's v2 operations are verified in jsdom**, against the real bridge
+   source, asserting `domShape` equality before and after undo. The DOM APIs used
+   are standard and identically specified in Chrome, but this was not re-run in
+   Chrome.
+4. **A failed or unbound preview's inline error state was not seen in a live
+   failure.** It is unit tested.
 
 ## Manual follow-up (needs a running inspected app + Ollama)
 

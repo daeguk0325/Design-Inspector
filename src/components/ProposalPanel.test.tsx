@@ -254,6 +254,16 @@ describe('ProposalPanel', () => {
     }
   });
 
+  it('does not tell the reader that the next message rolls a pending proposal back', () => {
+    // The next request is no longer a verdict: an undecided proposal stays
+    // undecided and keeps its change on the page, so the panel has to say that
+    // rather than the opposite.
+    const container = mount(<Panel open session={null} />);
+    const empty = container.querySelector('.proposal-empty')?.textContent ?? '';
+    expect(empty).not.toContain('되돌려');
+    expect(empty).toContain('그대로 남아 있습니다');
+  });
+
   it('copies the plain-text log on one button and the document on the other', () => {
     const container = mount(<Panel open session={session()} />);
     const [logButton, documentButton] = [

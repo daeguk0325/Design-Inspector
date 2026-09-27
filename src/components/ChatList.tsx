@@ -1,4 +1,4 @@
-import { useState, type RefObject } from 'react';
+import { useState, type ReactNode, type RefObject } from 'react';
 import { AttachmentChips } from '../editor/AttachmentChip.tsx';
 import type { DesignDecision, PreviewRuntimeStatus } from '../preview/transaction.ts';
 import type { ProposalState } from '../preview/proposal.ts';
@@ -11,6 +11,7 @@ import { UserText } from './CiteInline.tsx';
 export interface MessagePreviewStatus {
   status: PreviewRuntimeStatus;
   enabled?: boolean;
+  /** Kept for the shape the preview controller publishes; the row names the changes instead. */
   changeCount?: number;
   errorCode?: string;
   /** Present once the message carries a proposal. Absent means it proposed nothing. */
@@ -30,7 +31,6 @@ export interface ChatListProps {
   onRevert: (userMsg: ChatMessage) => void;
   previews?: MessagePreviewLookup;
   onDecision?: (messageId: string, decision: DesignDecision) => void;
-  onUndoPreview?: (messageId: string) => void;
   /** Re-selects a component the answer cited, in the inspected page. */
   onCite?: (selectionId: string) => void;
   /** Lets the parent drive the message scroll (jump buttons). */
@@ -48,28 +48,28 @@ interface DecisionOption {
 /**
  * Revise was a third state with no behaviour behind it: it recorded a third
  * value and changed nothing on screen. The product has two real outcomes for a
- * proposal — keep the applied change, or roll it back.
+ * proposal — keep the applied change, or roll it back — and both stay reachable
+ * for as long as the conversation lasts, because the user is allowed to change
+ * their mind after deciding.
  */
 const DECISION_OPTIONS: readonly DecisionOption[] = Object.freeze([
   { value: 'accepted', label: 'Accept', hint: 'Keep this change applied' },
   { value: 'rejected', label: 'Reject', hint: 'Roll this change back' },
 ]);
 
-const PROPOSAL_STATE_LABEL: Record<ProposalState, string> = Object.freeze({
-  pending: 'Waiting for you',
-  accepted: 'Kept',
-  rejected: 'Rolled back',
-});
-
-const PREVIEW_STATUS_LABEL: Record<PreviewRuntimeStatus, string> = Object.freeze({
-  'pending-rebind': 'Pending rebind',
-  applied: 'Applied',
-  unbound: 'Unbound',
-  ambiguous: 'Ambiguous',
-  rejected: 'Rejected',
-  undone: 'Undone',
-  reset: 'Reset',
-  'stale-binding': 'Stale binding',
+/**
+ * Words only for the states where the change is not sitting on the page. A
+ * change that applied, or that the user rolled back, already reads as exactly
+ * that in the toggle beside it, and a second word next to it was the clutter
+ * this row exists to remove.
+ */
+const UNAPPLIED_STATUS_LABEL: Partial<Record<PreviewRuntimeStatus, string>> = Object.freeze({
+  'pending-rebind': 'Applying…',
+  unbound: 'Not applied',
+  ambiguous: 'Ambiguous match',
+  rejected: 'Not applied',
+  reset: 'Cleared',
+  'stale-binding': 'Stale match',
 });
 
 function previewFor(
@@ -120,121 +120,115 @@ function MessageAttachments({ message }: { message: ChatMessage }) {
   );
 }
 
-function DecisionControls({
-  message,
-  onDecision,
-}: {
-  message: ChatMessage;
-  onDecision: (messageId: string, decision: DesignDecision) => void;
-}) {
-  return (
-    <div className="decide" role="group" aria-label="Design decision">
-      {DECISION_OPTIONS.map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          className="decide-btn"
-          data-decision={option.value}
-          aria-pressed={message.decision === option.value}
-          title={option.hint}
-          onClick={() => onDecision(message.id, option.value)}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
+/**
+ * What the row has to say when the change is not on the page, or never made it
+ * there. A failed preview used to sit in its own box next to a clean one; the
+ * risk this closes is a failure that reads as a clean row, so the words are
+ * short and they are inside the same row rather than beside it.
+ */
+function previewFailure(preview: MessagePreviewStatus): string | null {
+  const parts = [UNAPPLIED_STATUS_LABEL[preview.status] ?? null, preview.errorCode ?? null].filter(
+    (part): part is string => part !== null,
   );
+  return parts.length === 0 ? null : parts.join(' · ');
 }
 
 /**
- * The proposal itself: what it would change, and whether it is still waiting.
+ * One row for a previewed answer: the change on the left, and the toggle that
+ * keeps it or rolls it back on the right.
  *
- * The change lines are the same strings the next request will carry, so what
- * the user approves here is literally what the model is told. An undecided
- * proposal says so, because sending the next message rejects it.
+ * The change lines are the strings the next request carries, so what the user
+ * flips here is literally what the model is told. The toggle starts on Accept
+ * because the change is already on the page — asking the user to confirm what
+ * they are already looking at is what made the old row feel like furniture.
  */
-function ProposalState({
+function PreviewRow({
+  message,
   preview,
+  onDecision,
 }: {
+  message: ChatMessage;
   preview: MessagePreviewStatus;
+  onDecision?: (messageId: string, decision: DesignDecision) => void;
 }) {
-  const state = preview.proposalState;
-  if (!state) return null;
   const lines = preview.summaryLines ?? [];
+  const failure = previewFailure(preview);
+  // Nothing to keep and nothing to roll back: an answer that proposed no change
+  // gets no row, rather than a toggle over an empty subject.
+  if (lines.length === 0 && failure === null) return null;
+  // An undecided proposal is already applied, so the toggle reads Accept until
+  // the user says otherwise.
+  const active: DesignDecision = message.decision ?? 'accepted';
   return (
-    <div className="proposal" data-state={state}>
-      <span className="proposal-state" role="status">
-        {PROPOSAL_STATE_LABEL[state]}
-      </span>
-      {lines.length > 0 && (
-        <ul className="proposal-changes">
-          {lines.map((line) => (
-            <li key={line}>{line}</li>
+    <div className="preview-row">
+      <span className="preview-state" data-state={preview.status} role="status">
+        <span className="dot" aria-hidden="true" />
+        <span className="preview-changes">
+          {lines.map((line, index) => (
+            <span className="preview-change mono" key={`${line}-${index}`}>
+              {line}
+            </span>
           ))}
-        </ul>
-      )}
-      {state === 'pending' && (
-        <p className="proposal-note">Send the next message to roll this back.</p>
+        </span>
+        {failure !== null && <span className="preview-error">{failure}</span>}
+      </span>
+      {onDecision && (
+        <div className="decide" role="group" aria-label="This answer's previewed change">
+          {DECISION_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className="decide-btn"
+              data-decision={option.value}
+              aria-pressed={active === option.value}
+              title={option.hint}
+              onClick={() => onDecision(message.id, option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );
 }
 
-function PreviewState({
-  message,
-  preview,
-  onUndoPreview,
-}: {
-  message: ChatMessage;
-  preview: MessagePreviewStatus;
-  onUndoPreview?: (messageId: string) => void;
-}) {
-  const label = PREVIEW_STATUS_LABEL[preview.status] ?? preview.status;
-  const changes = preview.changeCount;
-  const changeText =
-    typeof changes === 'number' && Number.isFinite(changes) && changes > 0
-      ? ` · ${Math.floor(changes)} change${Math.floor(changes) === 1 ? '' : 's'}`
-      : '';
-  const undoable = preview.status === 'applied';
-  const hint = [
-    label,
-    preview.enabled === true ? 'enabled' : preview.enabled === false ? 'disabled' : null,
-    preview.errorCode ? preview.errorCode : null,
-  ]
-    .filter((part): part is string => part !== null)
-    .join(' · ');
-  return (
-    <div className="preview-row">
-      <span className="preview-state" data-state={preview.status} role="status" title={hint}>
-        <span className="dot" aria-hidden="true" />
-        {label}
-        {changeText}
+interface StatusNote {
+  node: ReactNode;
+  error: boolean;
+}
+
+/**
+ * What the line under the bubble says. Returns null when the bubble already
+ * shows the state on its own, so one state never gets two sets of motion.
+ */
+function statusNoteFor(message: ChatMessage, isLive: boolean, streaming: boolean): StatusNote | null {
+  const status = message.status;
+  if (status === undefined || status === 'completed') return null;
+  if (status === 'error') return { node: 'Error — request preserved.', error: true };
+  if (status === 'interrupted') return { node: 'Stopped — request preserved.', error: false };
+  if (!streaming) return { node: 'Starting…', error: false };
+  if (message.content === '' && isLive) return null;
+  return {
+    node: (
+      <span className="status-live">
+        <Spinner />
+        <TypingDots />
       </span>
-      <span className="preview-diff" aria-label="Applied to the live target">
-        <span className="preview-slot">Live target</span>
-      </span>
-      {onUndoPreview && (
-        <button
-          type="button"
-          className="mini preview-undo"
-          disabled={!undoable}
-          aria-label={`Undo preview for this answer${undoable ? '' : ' — nothing applied to undo'}`}
-          title={undoable ? 'Undo the applied preview' : 'Nothing applied to undo'}
-          onClick={() => onUndoPreview(message.id)}
-        >
-          Undo
-        </button>
-      )}
-    </div>
-  );
+    ),
+    error: false,
+  };
 }
 
 function MessageBody({ message, onCite }: { message: ChatMessage; onCite?: (selectionId: string) => void }) {
   if (message.content === '' && message.status === 'streaming') {
+    // The two words that used to sit here said nothing the ring and the dots
+    // do not already say, and having them in two places at once read as two
+    // different statuses. Motion alone carries "working".
     return (
       <span className="typing-row">
+        <Spinner />
         <TypingDots />
-        <span className="typing-label">답변 작성 중…</span>
       </span>
     );
   }
@@ -312,7 +306,6 @@ export function ChatList({
   onRevert,
   previews,
   onDecision,
-  onUndoPreview,
   onCite,
   scrollRef,
   onListScroll,
@@ -338,9 +331,12 @@ export function ChatList({
     <div className="messages" aria-live="polite" ref={scrollRef} onScroll={onListScroll}>
       {messages.map((m) => {
         const preview = previewFor(previews, m.id);
-        const decided = preview?.proposalState === 'accepted' || preview?.proposalState === 'rejected';
         const thinking = m.role === 'assistant' && m.thinking ? m.thinking : null;
         const isLive = m.status === 'streaming' && streaming;
+        // The empty bubble already carries the ring and the dots, so repeating
+        // them in the status line would put the same two motions on screen twice
+        // for one state.
+        const statusNote = statusNoteFor(m, isLive, streaming);
         return (
           <div className={`msg ${m.role}`} key={m.id}>
             {thinking !== null && (
@@ -354,25 +350,11 @@ export function ChatList({
               <MessageAttachments message={m} />
             </div>
             {m.role === 'assistant' && preview && (
-              <PreviewState message={m} preview={preview} onUndoPreview={onUndoPreview} />
+              <PreviewRow message={m} preview={preview} onDecision={onDecision} />
             )}
-            {m.role === 'assistant' && preview && <ProposalState preview={preview} />}
-            {m.role === 'assistant' && onDecision && preview?.proposalState && !decided && (
-              <DecisionControls message={m} onDecision={onDecision} />
-            )}
-            {m.role === 'assistant' && m.status !== undefined && m.status !== 'completed' && (
-              <span className={`status-note ${m.status === 'error' ? 'err' : ''}`} role="status">
-                {m.status === 'streaming'
-                  ? streaming
-                    ? (
-                      <span className="status-live">
-                        <Spinner />
-                        <span>답변 작성 중</span>
-                        <TypingDots />
-                      </span>
-                    )
-                    : 'Starting…'
-                  : m.status === 'interrupted' ? 'Stopped — request preserved.' : 'Error — request preserved.'}
+            {m.role === 'assistant' && statusNote !== null && (
+              <span className={`status-note ${statusNote.error ? 'err' : ''}`} role="status">
+                {statusNote.node}
               </span>
             )}
             <div className="actions">

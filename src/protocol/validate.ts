@@ -39,6 +39,7 @@ export const PROTOCOL_LIMITS = Object.freeze({
   previewPropertiesPerChange: 12,
   previewPropertyChars: 64,
   previewValueChars: 120,
+  previewReplaceTextChars: 200,
   previewAnchorResults: 12,
   previewMatchCount: 1_000,
   capabilityMaxSelectionImages: 16,
@@ -73,7 +74,25 @@ const ANCHOR_KEYS: ReadonlySet<string> = new Set([
   'testId',
   'path',
 ]);
-const PREVIEW_CHANGE_KEYS: ReadonlySet<string> = new Set(['anchor', 'declarations']);
+/**
+ * §9f operations. `anchor` and `declarations` are always on the wire — the
+ * controller sends an empty declarations map for a change that carries only a
+ * text or element operation — so those two are required and the three operations
+ * are optional. The operation vocabularies and the text bound are re-declared
+ * here instead of imported from preview/contract.ts: this module is the trust
+ * boundary and already re-implements CSS validation independently, and a shared
+ * import would be the one change that could not be checked on its own.
+ */
+const PREVIEW_CHANGE_REQUIRED_KEYS: ReadonlySet<string> = new Set(['anchor', 'declarations']);
+const PREVIEW_CHANGE_KEYS: ReadonlySet<string> = new Set([
+  'anchor',
+  'declarations',
+  'text',
+  'replaceText',
+  'element',
+]);
+const PREVIEW_TEXT_OPS: ReadonlySet<string> = new Set(['clear']);
+const PREVIEW_ELEMENT_OPS: ReadonlySet<string> = new Set(['hide', 'remove']);
 const PREVIEW_ANCHOR_RESULT_KEYS: ReadonlySet<string> = new Set([
   'elementKey',
   'status',
@@ -312,6 +331,14 @@ function hasExactKeys(value: Record<string, unknown>, allowed: ReadonlySet<strin
   return true;
 }
 
+/** Every required key present, extras unjudged here. See `hasOnlyKeys`. */
+function hasRequiredKeys(value: Record<string, unknown>, required: ReadonlySet<string>): boolean {
+  for (const key of required) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) return false;
+  }
+  return true;
+}
+
 function isRouteKey(value: unknown): value is string {
   return isBoundedString(value, L.routeKeyChars, true);
 }
@@ -411,10 +438,13 @@ function isCssValueValid(value: unknown): boolean {
   return true;
 }
 
-function isDeclarationsValid(value: unknown): boolean {
+function isDeclarationsValid(value: unknown, allowEmpty: boolean): boolean {
   if (!isRecord(value)) return false;
   const entries = Object.entries(value);
-  if (entries.length < 1 || entries.length > L.previewPropertiesPerChange) return false;
+  if (entries.length > L.previewPropertiesPerChange) return false;
+  // Empty only when another operation is doing the work; see
+  // isPreviewChangeValid.
+  if (entries.length < 1 && !allowEmpty) return false;
   for (const [property, declaration] of entries) {
     if (property.length === 0 || property.length > L.previewPropertyChars) return false;
     if (RESERVED_DECLARATION_KEYS.has(property)) return false;
@@ -424,13 +454,50 @@ function isDeclarationsValid(value: unknown): boolean {
   return true;
 }
 
+/**
+ * The §9f operation keys, checked with the same rules the block contract uses.
+ *
+ * A change carrying only a text or element operation is legal and was being
+ * refused: the required key set was `anchor` + `declarations` with nothing
+ * optional and a non-empty declarations map, so every `text: "clear"` the model
+ * emitted was rejected by the app's own outbound check and the page was never
+ * touched. That is the app→bridge trust boundary second-guessing a change the
+ * Bridge has already implemented.
+ */
+function isPreviewChangeValid(item: Record<string, unknown>): boolean {
+  if (!hasRequiredKeys(item, PREVIEW_CHANGE_REQUIRED_KEYS)) return false;
+  const text = item['text'];
+  if (text !== undefined && !PREVIEW_TEXT_OPS.has(text as string)) return false;
+  const element = item['element'];
+  if (element !== undefined && !PREVIEW_ELEMENT_OPS.has(element as string)) return false;
+  const replaceText = item['replaceText'];
+  if (replaceText !== undefined) {
+    // Clearing and replacing are two ways to do one job, so a change that asks
+    // for both has no single meaning for the Bridge to apply.
+    if (text !== undefined) return false;
+    if (typeof replaceText !== 'string' || replaceText.length > L.previewReplaceTextChars) {
+      return false;
+    }
+  }
+  if (!isDeclarationsValid(item['declarations'], true)) return false;
+  // A change with no operation at all would be forwarded as an empty restyle.
+  const declarations = item['declarations'] as Record<string, string>;
+  return (
+    Object.keys(declarations).length > 0 ||
+    text !== undefined ||
+    replaceText !== undefined ||
+    element !== undefined
+  );
+}
+
 function isPreviewChangesValid(value: unknown): boolean {
   if (!Array.isArray(value)) return false;
   if (value.length < 1 || value.length > L.previewChanges) return false;
   const seen = new Set<string>();
   let routeKey: string | null = null;
   for (const item of value) {
-    if (!isRecord(item) || !hasExactKeys(item, PREVIEW_CHANGE_KEYS)) return false;
+    if (!isRecord(item) || !hasOnlyKeys(item, PREVIEW_CHANGE_KEYS)) return false;
+    if (!isPreviewChangeValid(item)) return false;
     const anchor = item['anchor'];
     if (!isAnchorValid(anchor)) return false;
     const elementKey = anchor['elementKey'] as string;
@@ -439,7 +506,6 @@ function isPreviewChangesValid(value: unknown): boolean {
     const changeRouteKey = anchor['routeKey'] as string;
     if (routeKey === null) routeKey = changeRouteKey;
     else if (routeKey !== changeRouteKey) return false;
-    if (!isDeclarationsValid(item['declarations'])) return false;
   }
   return true;
 }

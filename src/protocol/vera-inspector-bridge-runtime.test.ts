@@ -1364,3 +1364,544 @@ describe('freeze inert state', () => {
     expect(harness.contractFailures()).toEqual([]);
   });
 });
+
+/** Child node types plus their text, so a rollback can be compared exactly. */
+function domShape(element: Element): string {
+  return [...element.childNodes]
+    .map((node) => (node.nodeType === 3 ? `text(${JSON.stringify(node.nodeValue ?? '')})` : node.nodeName))
+    .join(',');
+}
+
+function textChildNodes(element: Element): string[] {
+  return [...element.childNodes].filter((node) => node.nodeType === 3).map((node) => node.nodeValue ?? '');
+}
+
+function mountRich(testId: string, parts: Array<string | HTMLElement>): HTMLElement {
+  const element = document.createElement('p');
+  element.setAttribute('data-testid', testId);
+  for (const part of parts) {
+    element.appendChild(typeof part === 'string' ? document.createTextNode(part) : part);
+  }
+  document.body.appendChild(element);
+  return element;
+}
+
+function inlineNode(tag: string, text: string): HTMLElement {
+  const element = document.createElement(tag);
+  element.textContent = text;
+  return element;
+}
+
+/** Page-owned body children only: the bridge keeps its own overlay host there. */
+function pageChildren(): Element[] {
+  return [...document.body.children].filter(
+    (element) => element.getAttribute('data-vera-inspector') === null,
+  );
+}
+
+describe('preview v2 text and element operations', () => {
+  it('clears only the direct text children, leaves child elements alone, and restores both on undo', () => {
+    const harness = createHarness();
+    harness.hello();
+    const bold = inlineNode('b', 'bold');
+    const target = mountRich('clear-target', ['Hello ', bold, ' world']);
+    const before = domShape(target);
+    expect(textChildNodes(target)).toEqual(['Hello ', ' world']);
+
+    const results = harness.apply('bind-1', 'tx-clear', [
+      { anchor: testIdAnchor('clear-target'), declarations: {}, text: 'clear' },
+    ]);
+
+    expect(results[0]?.payload).toMatchObject({ status: 'applied' });
+    expect(results[0]?.payload['anchors']).toEqual([
+      { elementKey: 'html:testid:clear-target', status: 'applied', matchCount: 1 },
+    ]);
+    expect(textChildNodes(target)).toEqual([]);
+    expect(target.childNodes).toHaveLength(1);
+    expect(target.firstChild).toBe(bold);
+    expect(target.textContent).toBe('bold');
+    // Nothing to scope, so a text-only change must not leave a style layer.
+    expect(previewStyleLayers()).toHaveLength(0);
+    expect(previewAttributes(target)).toEqual([]);
+
+    expect(harness.undo('bind-1', 'tx-clear')[0]?.payload).toMatchObject({ status: 'undone' });
+    expect(domShape(target)).toBe(before);
+    expect(target.textContent).toBe('Hello bold world');
+    expect(target.firstChild).not.toBe(bold);
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('restores interleaved text runs in their original order', () => {
+    const harness = createHarness();
+    harness.hello();
+    const first = inlineNode('b', 'one');
+    const second = inlineNode('i', 'two');
+    const target = mountRich('order-target', ['a', first, 'b', second, 'c']);
+    const before = domShape(target);
+
+    harness.apply('bind-1', 'tx-order', [
+      { anchor: testIdAnchor('order-target'), declarations: {}, text: 'clear' },
+    ]);
+    expect(domShape(target)).toBe('B,I');
+
+    harness.undo('bind-1', 'tx-order');
+    expect(domShape(target)).toBe(before);
+    expect(target.textContent).toBe('aonebtwoc');
+  });
+
+  it('replaces the text and gives the original string back on undo', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('replace-target', ['Original copy']);
+    const before = domShape(target);
+
+    const results = harness.apply('bind-1', 'tx-replace', [
+      { anchor: testIdAnchor('replace-target'), declarations: {}, replaceText: 'Replacement copy' },
+    ]);
+
+    expect(results[0]?.payload).toMatchObject({ status: 'applied' });
+    expect(textChildNodes(target)).toEqual(['Replacement copy']);
+
+    harness.undo('bind-1', 'tx-replace');
+    expect(domShape(target)).toBe(before);
+    expect(target.textContent).toBe('Original copy');
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('replaces text around a child element and rebuilds the exact original run', () => {
+    const harness = createHarness();
+    harness.hello();
+    const bold = inlineNode('b', 'bold');
+    const target = mountRich('replace-inline-target', ['before ', bold, ' after']);
+    const before = domShape(target);
+
+    harness.apply('bind-1', 'tx-replace-inline', [
+      { anchor: testIdAnchor('replace-inline-target'), declarations: {}, replaceText: 'new' },
+    ]);
+    expect(target.textContent).toBe('newbold');
+
+    harness.undo('bind-1', 'tx-replace-inline');
+    expect(domShape(target)).toBe(before);
+    expect(target.textContent).toBe('before bold after');
+  });
+
+  it('creates a text node when the element has no text of its own to replace', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('replace-empty-target', [inlineNode('span', 'kept')]);
+    const before = domShape(target);
+
+    const results = harness.apply('bind-1', 'tx-replace-empty', [
+      { anchor: testIdAnchor('replace-empty-target'), declarations: {}, replaceText: 'added' },
+    ]);
+
+    expect(results[0]?.payload).toMatchObject({ status: 'applied' });
+    expect(target.textContent).toBe('keptadded');
+
+    harness.undo('bind-1', 'tx-replace-empty');
+    expect(domShape(target)).toBe(before);
+    expect(target.textContent).toBe('kept');
+  });
+
+  it('hides through the layer rule and takes the element itself back on undo', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountElement('hide-target');
+    const before = domShape(target);
+
+    const results = harness.apply('bind-1', 'tx-hide', [
+      { anchor: testIdAnchor('hide-target'), declarations: {}, element: 'hide' },
+    ]);
+
+    expect(results[0]?.payload).toMatchObject({ status: 'applied' });
+    // 'hide' must not detach anything: the layer is what reverses it.
+    expect(target.isConnected).toBe(true);
+    expect(domShape(target)).toBe(before);
+    const attributes = previewAttributes(target);
+    expect(attributes).toHaveLength(1);
+    const layers = previewStyleLayers();
+    expect(layers).toHaveLength(1);
+    const css = layers[0]?.textContent ?? '';
+    expect(css).toContain('display:none');
+    expect(css).toContain(`${attributes[0]}="${target.getAttribute(attributes[0] ?? '')}"`);
+    expect(window.getComputedStyle(target).display).toBe('none');
+
+    harness.undo('bind-1', 'tx-hide');
+    expect(previewStyleLayers()).toHaveLength(0);
+    expect(previewAttributes(target)).toEqual([]);
+    expect(window.getComputedStyle(target).display).not.toBe('none');
+  });
+
+  it('keeps the display denylist closed to free-form declarations', () => {
+    const harness = createHarness();
+    harness.hello();
+    mountElement('deny-target');
+    const results = harness.apply('bind-1', 'tx-deny', [
+      { anchor: testIdAnchor('deny-target'), declarations: { display: 'none' } },
+    ]);
+    expect(results[0]?.payload['status']).toBe('rejected');
+    expect(previewStyleLayers()).toHaveLength(0);
+  });
+
+  it('detaches the element and re-inserts it at its original position on undo', () => {
+    const harness = createHarness();
+    harness.hello();
+    const before = mountElement('remove-before');
+    const target = mountElement('remove-target');
+    const after = mountElement('remove-after');
+    const siblings = pageChildren;
+
+    const results = harness.apply('bind-1', 'tx-remove', [
+      { anchor: testIdAnchor('remove-target'), declarations: {}, element: 'remove' },
+    ]);
+
+    expect(results[0]?.payload).toMatchObject({ status: 'applied' });
+    expect(target.isConnected).toBe(false);
+    expect(siblings()).toEqual([before, after]);
+    const placeholder = after.previousSibling;
+    expect(placeholder?.nodeType).toBe(8);
+
+    harness.undo('bind-1', 'tx-remove');
+    expect(siblings()).toEqual([before, target, after]);
+    expect(target.isConnected).toBe(true);
+    expect(target.parentElement).toBe(document.body);
+    expect(after.previousSibling).toBe(target);
+    expect(placeholder?.parentNode).toBeNull();
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('applies text and element operations alongside declarations in one change', () => {
+    const harness = createHarness();
+    harness.hello();
+    const bold = inlineNode('b', 'bold');
+    const target = mountRich('combined-target', ['copy ', bold]);
+    const before = domShape(target);
+
+    const results = harness.apply('bind-1', 'tx-combined', [
+      {
+        anchor: testIdAnchor('combined-target'),
+        declarations: { color: 'red' },
+        text: 'clear',
+        element: 'hide',
+      },
+    ]);
+
+    expect(results[0]?.payload).toMatchObject({ status: 'applied' });
+    expect(textChildNodes(target)).toEqual([]);
+    const css = previewStyleLayers()[0]?.textContent ?? '';
+    expect(css).toContain('color:red');
+    expect(css).toContain('display:none');
+
+    harness.undo('bind-1', 'tx-combined');
+    expect(domShape(target)).toBe(before);
+    expect(previewStyleLayers()).toHaveLength(0);
+    expect(previewAttributes(target)).toEqual([]);
+  });
+
+  it('is stable when the same transaction is applied twice and undone twice', () => {
+    const harness = createHarness();
+    harness.hello();
+    const before = mountElement('stable-before');
+    const target = mountRich('stable-target', ['keep ', inlineNode('b', 'bold')]);
+    const after = mountElement('stable-after');
+    const shape = domShape(target);
+    const siblings = pageChildren;
+
+    for (const replace of ['first', 'second']) {
+      const results = harness.apply('bind-1', 'tx-stable', [
+        { anchor: testIdAnchor('stable-target'), declarations: { color: 'red' }, replaceText: replace },
+      ]);
+      expect(results[0]?.payload['status']).toBe('applied');
+      expect(target.textContent).toBe(`${replace}bold`);
+      // The previous round's records are gone with its layer, so a second apply
+      // cannot leave a stack of stale text nodes behind it.
+      expect(previewStyleLayers()).toHaveLength(1);
+      expect(previewAttributes(target)).toHaveLength(1);
+    }
+    expect(siblings()).toEqual([before, target, after]);
+
+    expect(harness.undo('bind-1', 'tx-stable')[0]?.payload).toMatchObject({ status: 'undone' });
+    expect(domShape(target)).toBe(shape);
+    expect(siblings()).toEqual([before, target, after]);
+    expect(harness.undo('bind-1', 'tx-stable')[0]?.payload).toMatchObject({ status: 'no-op' });
+    expect(domShape(target)).toBe(shape);
+    expect(siblings()).toEqual([before, target, after]);
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('survives a re-apply of a remove without leaving orphan placeholders', () => {
+    const harness = createHarness();
+    harness.hello();
+    const before = mountElement('reapply-remove-before');
+    const target = mountElement('reapply-remove-target');
+    const after = mountElement('reapply-remove-after');
+    const placeholders = (): number =>
+      [...document.body.childNodes].filter((node) => node.nodeType === 8).length;
+
+    harness.apply('bind-1', 'tx-reapply-remove', [
+      { anchor: testIdAnchor('reapply-remove-target'), declarations: {}, element: 'remove' },
+    ]);
+    expect(placeholders()).toBe(1);
+    // The re-apply cannot resolve the element it detached last time, so this
+    // round is unbound and the first round's placeholder is still in place.
+    const second = harness.apply('bind-1', 'tx-reapply-remove', [
+      { anchor: testIdAnchor('reapply-remove-target'), declarations: {}, element: 'remove' },
+    ]);
+    expect(second[0]?.payload['status']).toBe('unbound');
+    expect(placeholders()).toBe(1);
+
+    harness.undo('bind-1', 'tx-reapply-remove');
+    expect(placeholders()).toBe(0);
+    expect(pageChildren()).toEqual([before, target, after]);
+  });
+
+  it('rejects every invalid value for the new keys and leaves the page untouched', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('invalid-op-target', ['copy']);
+    const before = domShape(target);
+    const rejected: PreviewChangeInput[] = [
+      { anchor: testIdAnchor('invalid-op-target'), declarations: {}, text: 'wipe' },
+      { anchor: testIdAnchor('invalid-op-target'), declarations: {}, text: true },
+      { anchor: testIdAnchor('invalid-op-target'), declarations: {}, text: null },
+      { anchor: testIdAnchor('invalid-op-target'), declarations: {}, replaceText: 42 },
+      { anchor: testIdAnchor('invalid-op-target'), declarations: {}, replaceText: 'x'.repeat(201) },
+      { anchor: testIdAnchor('invalid-op-target'), declarations: {}, element: 'collapse' },
+      { anchor: testIdAnchor('invalid-op-target'), declarations: {}, element: 'hidden' },
+      { anchor: testIdAnchor('invalid-op-target'), declarations: {}, element: true },
+      { anchor: testIdAnchor('invalid-op-target'), declarations: {}, text: 'clear', replaceText: 'both' },
+      { anchor: testIdAnchor('invalid-op-target'), declarations: {}, extra: 'invented' },
+      { anchor: testIdAnchor('invalid-op-target'), declarations: {} },
+      { anchor: testIdAnchor('invalid-op-target') },
+      { anchor: testIdAnchor('invalid-op-target'), declarations: 'color: red' },
+    ];
+    for (const change of rejected) {
+      const results = harness.apply('bind-1', 'tx-invalid-op', [change]);
+      expect(results).toHaveLength(1);
+      expect(results[0]?.payload['status']).toBe('rejected');
+      expect(domShape(target)).toBe(before);
+      expect(target.isConnected).toBe(true);
+    }
+    expect(previewStyleLayers()).toHaveLength(0);
+    expect(markedElements()).toEqual([]);
+    expect(harness.undo('bind-1', 'tx-invalid-op')[0]?.payload).toMatchObject({ status: 'no-op' });
+    expect(domShape(target)).toBe(before);
+  });
+
+  it('accepts a replaceText of exactly the bound and rejects nothing else', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('bound-target', ['copy']);
+    const results = harness.apply('bind-1', 'tx-bound', [
+      { anchor: testIdAnchor('bound-target'), declarations: {}, replaceText: 'y'.repeat(200) },
+    ]);
+    expect(results[0]?.payload['status']).toBe('applied');
+    expect(target.textContent).toBe('y'.repeat(200));
+  });
+
+  it('rebuilds a run of adjacent text nodes that has no element between it', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('adjacent-target', ['one ', 'two ', 'three']);
+    const before = domShape(target);
+
+    harness.apply('bind-1', 'tx-adjacent', [
+      { anchor: testIdAnchor('adjacent-target'), declarations: {}, text: 'clear' },
+    ]);
+    expect(domShape(target)).toBe('');
+
+    harness.undo('bind-1', 'tx-adjacent');
+    expect(domShape(target)).toBe(before);
+    expect(target.textContent).toBe('one two three');
+  });
+
+  it('reports an element with no text of its own as an unchanged but applied clear', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('no-text-target', [inlineNode('span', 'kept')]);
+    const before = domShape(target);
+
+    const results = harness.apply('bind-1', 'tx-no-text', [
+      { anchor: testIdAnchor('no-text-target'), declarations: {}, text: 'clear' },
+    ]);
+
+    expect(results[0]?.payload).toMatchObject({ status: 'applied' });
+    expect(domShape(target)).toBe(before);
+    harness.undo('bind-1', 'tx-no-text');
+    expect(domShape(target)).toBe(before);
+  });
+
+  it('rejects a text clear past the node bound rather than clearing part of it', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('bounded-target', []);
+    for (let i = 0; i < 65; i += 1) target.appendChild(document.createTextNode(`t${i}`));
+    const before = domShape(target);
+
+    const results = harness.apply('bind-1', 'tx-bounded', [
+      { anchor: testIdAnchor('bounded-target'), declarations: {}, text: 'clear' },
+    ]);
+
+    expect(results[0]?.payload['status']).toBe('rejected');
+    expect(results[0]?.payload['anchors']).toEqual([
+      { elementKey: 'html:testid:bounded-target', status: 'rejected', matchCount: 1 },
+    ]);
+    expect(domShape(target)).toBe(before);
+    harness.undo('bind-1', 'tx-bounded');
+    expect(domShape(target)).toBe(before);
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('marks only the failing anchor rejected when one operation in a transaction fails', () => {
+    const harness = createHarness();
+    harness.hello();
+    const styled = mountElement('partial-styled');
+    const doomed = mountRich('partial-doomed', []);
+    for (let i = 0; i < 65; i += 1) doomed.appendChild(document.createTextNode(`t${i}`));
+    const before = domShape(doomed);
+
+    const results = harness.apply('bind-1', 'tx-partial', [
+      { anchor: testIdAnchor('partial-styled'), declarations: { color: 'red' } },
+      { anchor: testIdAnchor('partial-doomed'), declarations: {}, text: 'clear' },
+    ]);
+
+    expect(results[0]?.payload['status']).toBe('rejected');
+    expect(results[0]?.payload['anchors']).toEqual([
+      { elementKey: 'html:testid:partial-styled', status: 'applied', matchCount: 1 },
+      { elementKey: 'html:testid:partial-doomed', status: 'rejected', matchCount: 1 },
+    ]);
+    expect(domShape(doomed)).toBe(before);
+    expect(previewStyleLayers()[0]?.textContent).toContain('color:red');
+    // The half that did apply is still reversible.
+    harness.undo('bind-1', 'tx-partial');
+    expect(previewStyleLayers()).toHaveLength(0);
+    expect(previewAttributes(styled)).toEqual([]);
+    expect(domShape(doomed)).toBe(before);
+    expect(harness.contractFailures()).toEqual([]);
+  });
+
+  it('rejects a transaction that targets the same element twice', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('duplicate-op-target', ['copy']);
+    const before = domShape(target);
+
+    const results = harness.apply('bind-1', 'tx-duplicate-op', [
+      { anchor: testIdAnchor('duplicate-op-target'), declarations: {}, text: 'clear' },
+      { anchor: testIdAnchor('duplicate-op-target'), declarations: { color: 'red' } },
+    ]);
+
+    expect(results[0]?.payload['status']).toBe('rejected');
+    expect(domShape(target)).toBe(before);
+    expect(previewStyleLayers()).toHaveLength(0);
+    expect(previewAttributes(target)).toEqual([]);
+  });
+
+  it('rejects a transaction that reaches one element through two different anchors', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('double-anchored', ['copy']);
+
+    const results = harness.apply('bind-1', 'tx-double-anchored', [
+      { anchor: testIdAnchor('double-anchored'), declarations: { color: 'red' } },
+      {
+        // A cross-route anchor with a strong hint rebinds onto the same element
+        // under a different elementKey, so these two changes collide on one node
+        // without ever sharing an anchor.
+        anchor: testIdAnchor('double-anchored', {
+          elementKey: 'html:path:html/body/9',
+          routeKey: '/some-other-route',
+          tagName: 'p',
+        }),
+        declarations: { color: 'blue' },
+      },
+    ]);
+
+    expect(results[0]?.payload['status']).toBe('rejected');
+    expect(previewStyleLayers()).toHaveLength(0);
+    expect(previewAttributes(target)).toEqual([]);
+  });
+
+  it('does not resurrect text whose parent the page detached', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('orphaned-text-target', ['copy ', inlineNode('b', 'bold')]);
+
+    harness.apply('bind-1', 'tx-orphaned-text', [
+      { anchor: testIdAnchor('orphaned-text-target'), declarations: {}, text: 'clear' },
+    ]);
+    expect(textChildNodes(target)).toEqual([]);
+    target.remove();
+
+    expect(() => harness.undo('bind-1', 'tx-orphaned-text')).not.toThrow();
+    expect(domShape(target)).toBe('B');
+    expect(document.body.textContent).not.toContain('copy');
+    expect(harness.undo('bind-1', 'tx-orphaned-text')[0]?.payload).toMatchObject({ status: 'no-op' });
+  });
+
+  it('does not resurrect an element whose placeholder the page removed', () => {
+    const harness = createHarness();
+    harness.hello();
+    const before = mountElement('gone-placeholder-before');
+    const target = mountElement('gone-placeholder-target');
+    const after = mountElement('gone-placeholder-after');
+
+    harness.apply('bind-1', 'tx-gone-placeholder', [
+      { anchor: testIdAnchor('gone-placeholder-target'), declarations: {}, element: 'remove' },
+    ]);
+    const placeholder = after.previousSibling;
+    placeholder?.parentNode?.removeChild(placeholder);
+
+    expect(() => harness.undo('bind-1', 'tx-gone-placeholder')).not.toThrow();
+    expect(pageChildren()).toEqual([before, after]);
+    expect(target.isConnected).toBe(false);
+  });
+
+  it('replays every operation on a session reset, not just on an undo', () => {
+    const harness = createHarness();
+    harness.hello();
+    const target = mountRich('reset-restore', ['copy ', inlineNode('b', 'bold')]);
+    const card = mountElement('reset-restore-card');
+    const shape = domShape(target);
+
+    harness.apply('bind-1', 'tx-reset-restore', [
+      { anchor: testIdAnchor('reset-restore'), declarations: {}, replaceText: 'new' },
+      { anchor: testIdAnchor('reset-restore-card'), declarations: {}, element: 'remove' },
+    ]);
+    expect(target.textContent).toBe('newbold');
+    expect(card.isConnected).toBe(false);
+
+    harness.dispatch('VERA_INSPECTOR_SESSION_RESET', {}, nextRequestId('reset-restores'));
+    expect(domShape(target)).toBe(shape);
+    expect(card.isConnected).toBe(true);
+    expect(previewStyleLayers()).toHaveLength(0);
+    expect(pageChildren()).toContain(card);
+  });
+
+  it('restores a detached subtree before the text inside it', () => {
+    const harness = createHarness();
+    harness.hello();
+    const card = mountElement('nested-remove-card');
+    const inner = inlineNode('span', 'inner copy');
+    inner.setAttribute('data-testid', 'nested-remove-card-inner');
+    card.appendChild(inner);
+    const shape = domShape(card);
+
+    const results = harness.apply('bind-1', 'tx-nested-remove', [
+      { anchor: testIdAnchor('nested-remove-card'), declarations: {}, element: 'remove' },
+      { anchor: testIdAnchor('nested-remove-card-inner'), declarations: {}, text: 'clear' },
+    ]);
+
+    expect(results[0]?.payload['status']).toBe('applied');
+    expect(card.isConnected).toBe(false);
+    expect(inner.textContent).toBe('');
+
+    // The card has to be back in the document before its descendant counts as a
+    // live parent, or the text restore would be skipped as an orphan.
+    harness.undo('bind-1', 'tx-nested-remove');
+    expect(card.isConnected).toBe(true);
+    expect(domShape(card)).toBe(shape);
+    expect(card.textContent).toBe('inner copy');
+    expect(harness.contractFailures()).toEqual([]);
+  });
+});

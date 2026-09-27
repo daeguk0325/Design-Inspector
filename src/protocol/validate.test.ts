@@ -1075,6 +1075,58 @@ describe('app command validation', () => {
     expect(res.ok).toBe(true);
   });
 
+  it('accepts the v2 operations the Bridge already implements', () => {
+    // Regression: `anchor` + a non-empty `declarations` map was the whole
+    // required key set, so a change carrying only `text` was rejected by the
+    // app's own outbound check and the page was never touched. The app→bridge
+    // trust boundary was refusing a legal change the contract had already
+    // accepted and the Bridge had already implemented.
+    const changes = [
+      { anchor: anchor(), declarations: {}, text: 'clear' },
+      { anchor: anchor({ elementKey: 'html:id:b' }), declarations: {}, replaceText: '주문하기' },
+      { anchor: anchor({ elementKey: 'html:id:c' }), declarations: {}, element: 'hide' },
+      { anchor: anchor({ elementKey: 'html:id:d' }), declarations: {}, element: 'remove' },
+      { anchor: anchor({ elementKey: 'html:id:e' }), declarations: { padding: '12px 16px' }, text: 'clear' },
+    ];
+    const res = checkApp(envelope({
+      type: 'VERA_INSPECTOR_PREVIEW_APPLY',
+      payload: previewApply({ changes }),
+    }));
+    expect(res.ok).toBe(true);
+  });
+
+  it('rejects a change carrying no operation, or a malformed one', () => {
+    const change = previewApply().changes[0];
+    for (const changes of [
+      // Nothing to do: forwarded as an empty restyle.
+      [{ anchor: anchor(), declarations: {} }],
+      [{ anchor: anchor(), text: 'clear' }],
+      // Clearing and replacing are two ways to do one job.
+      [{ anchor: anchor(), declarations: {}, text: 'clear', replaceText: 'x' }],
+      [{ anchor: anchor(), declarations: {}, text: 'CLEAR' }],
+      [{ anchor: anchor(), declarations: {}, text: 'remove' }],
+      [{ anchor: anchor(), declarations: {}, element: 'display' }],
+      [{ anchor: anchor(), declarations: {}, element: 'none' }],
+      [{ anchor: anchor(), declarations: {}, element: true }],
+      [{ anchor: anchor(), declarations: {}, replaceText: 7 }],
+      [{ anchor: anchor(), declarations: {}, replaceText: '가'.repeat(201) }],
+    ]) {
+      const res = checkApp(envelope({
+        type: 'VERA_INSPECTOR_PREVIEW_APPLY',
+        payload: previewApply({ changes }),
+      }));
+      expect({ changes, ok: res.ok }).toEqual({ changes, ok: false });
+    }
+    // The bound itself is 200, the same one the block contract uses.
+    expect(checkApp(envelope({
+      type: 'VERA_INSPECTOR_PREVIEW_APPLY',
+      payload: previewApply({
+        changes: [{ anchor: anchor(), declarations: {}, replaceText: '가'.repeat(200) }],
+      }),
+    })).ok).toBe(true);
+    expect(change).toBeDefined();
+  });
+
   it('rejects unsafe preview undo and reset targeting', () => {
     for (const over of [
       { transactionId: '' },

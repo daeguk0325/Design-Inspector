@@ -379,6 +379,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
   flex-wrap: wrap;
   gap: 2px;
   align-self: flex-start;
+  flex: 0 0 auto;
   padding: 3px;
   border: 1px solid var(--border-soft);
   border-radius: 999px;
@@ -402,27 +403,31 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .decide-btn[data-decision='needs-revision'][aria-pressed='true'] { background: var(--warn); }
 .decide-btn[data-decision='rejected'][aria-pressed='true'] { background: var(--bad); }
 
+/* ---- preview row: the change on the left, the keep/roll-back toggle on the right ---- */
 .preview-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px 8px;
   font-size: 11.5px;
   color: var(--text-2);
 }
 .preview-state {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
-  padding: 2px 9px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px 10px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: var(--surface-soft);
   font-size: 11px;
   font-weight: 600;
-  white-space: nowrap;
 }
-.preview-state .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
+.preview-state .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); flex: 0 0 auto; }
 .preview-state[data-state='applied'] { color: var(--ok); border-color: rgba(22, 163, 74, 0.35); background: rgba(22, 163, 74, 0.08); }
 .preview-state[data-state='applied'] .dot { background: var(--ok); }
 .preview-state[data-state='pending-rebind'],
@@ -435,24 +440,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .preview-state[data-state='unbound'] .dot,
 .preview-state[data-state='ambiguous'] .dot,
 .preview-state[data-state='rejected'] .dot { background: var(--bad); }
-.preview-diff { display: inline-flex; align-items: center; gap: 5px; }
-.preview-slot {
-  width: 42px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border: 1px dashed var(--border);
-  border-radius: 6px;
-  background: var(--surface-soft);
-  color: var(--text-3);
-  font-size: 8.5px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.preview-arrow { color: var(--text-3); font-size: 11px; }
-.preview-undo { border: 1px solid var(--border); font-size: 11px; padding: 2px 9px; }
-.preview-undo:disabled { opacity: 0.45; cursor: not-allowed; }
+.preview-changes { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: 2px; min-width: 0; }
+.preview-change { overflow-wrap: anywhere; }
+.preview-change + .preview-change::before { content: '·'; margin: 0 6px; color: var(--text-3); }
+.preview-error { font-weight: 650; }
 
 .status-note { font-size: 12px; color: var(--text-3); }
 .status-note.err { color: var(--bad); }
@@ -504,7 +495,6 @@ button, input, textarea, select { font: inherit; color: inherit; }
 
 /* ---- streaming motion: dots that bounce, a ring that turns, a caret that blinks ---- */
 .typing-row { display: inline-flex; align-items: center; gap: 8px; }
-.typing-label { font-size: 13px; color: var(--text-2); }
 .typing-dots { display: inline-flex; align-items: center; gap: 3px; }
 .typing-dots span {
   width: 6px; height: 6px; border-radius: 50%;
@@ -857,20 +847,6 @@ button, input, textarea, select { font: inherit; color: inherit; }
   .statusline { margin-left: 0; }
 }
 
-/* ---- proposal state (§9f) ---- */
-.proposal {
-  margin: 6px 0 2px; padding: 8px 10px; border-radius: var(--radius-sm);
-  border: 1px solid var(--border-soft); background: var(--surface-soft);
-  font-size: 12.5px; display: flex; flex-direction: column; gap: 5px;
-}
-.proposal[data-state="pending"] { border-color: var(--accent-border); background: var(--accent-soft); }
-.proposal[data-state="rejected"] { opacity: 0.72; }
-.proposal-state { font-weight: 650; font-size: 11.5px; letter-spacing: 0.01em; }
-.proposal[data-state="accepted"] .proposal-state { color: var(--ok, #0f766e); }
-.proposal[data-state="rejected"] .proposal-state { color: var(--text-2); }
-.proposal-changes { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 2px; }
-.proposal-changes li { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); word-break: break-word; }
-.proposal-note { margin: 0; font-size: 11.5px; color: var(--text-2); }
 .icon-btn { display: inline-flex; align-items: center; gap: 5px; }
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -960,6 +936,5 @@ button, input, textarea, select { font: inherit; color: inherit; }
   .msg-attach .attach-chip-name { max-width: 108px; }
   .msg-attach .attach-chip-loc { max-width: 120px; }
   .msg.user .bubble { max-width: 100%; }
-  .preview-slot { width: 34px; height: 20px; font-size: 8px; }
   .cdetails-row { grid-template-columns: 68px minmax(0, 1fr); gap: 8px; }
 }

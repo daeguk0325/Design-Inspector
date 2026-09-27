@@ -980,6 +980,8 @@ const PREVIEW_MAX_PATH_CHARS = 1_024;
 const PREVIEW_MAX_CHANGES = 12;
 const PREVIEW_MAX_DECLARATIONS = 12;
 const PREVIEW_MAX_VALUE_CHARS = 120;
+const PREVIEW_MAX_REPLACE_TEXT_CHARS = 200;
+const PREVIEW_MAX_TEXT_NODES = 64;
 const PREVIEW_MAX_MATCH_COUNT = 1_000;
 const PREVIEW_MAX_LENGTH = 4_000;
 const PREVIEW_MAX_PERCENT = 400;
@@ -993,7 +995,15 @@ const PREVIEW_MAX_SPECIFICITY = 12;
 const PREVIEW_ATTRIBUTE_PREFIX = 'data-vera-inspector-pv-';
 const PREVIEW_LAYER_MARKER = 'preview-layer';
 const PREVIEW_NO_TRANSACTION = '*';
-const PREVIEW_CHANGE_KEYS: ReadonlySet<string> = new Set(['anchor', 'declarations']);
+const PREVIEW_REMOVED_PLACEHOLDER = 'vera-inspector-preview-removed';
+const PREVIEW_CHANGE_KEYS: ReadonlySet<string> = new Set([
+  'anchor',
+  'declarations',
+  'text',
+  'replaceText',
+  'element',
+]);
+const PREVIEW_CHANGE_REQUIRED_KEYS: ReadonlySet<string> = new Set(['anchor']);
 const PREVIEW_ANCHOR_KEYS: ReadonlySet<string> = new Set([
   'elementKey',
   'routeKey',
@@ -1427,6 +1437,55 @@ function validatePreviewDeclarations(input: unknown): PreviewDeclarationsCheck {
   return { ok: true, declarations: accepted };
 }
 
+type PreviewChangeCheck =
+  | {
+      ok: true;
+      declarations: Record<string, string>;
+      textOp: 'clear' | null;
+      replaceText: string | null;
+      elementOp: 'hide' | 'remove' | null;
+    }
+  | { ok: false; reason: string };
+
+function parsePreviewChange(raw: Record<string, unknown>): PreviewChangeCheck {
+  let declarations: Record<string, string> = {};
+  if (raw['declarations'] !== undefined) {
+    if (isPlainRecord(raw['declarations']) && Object.keys(raw['declarations']).length === 0) {
+      declarations = {};
+    } else {
+      const check = validatePreviewDeclarations(raw['declarations']);
+      if (!check.ok) return { ok: false, reason: check.reason };
+      declarations = check.declarations;
+    }
+  }
+  let textOp: 'clear' | null = null;
+  if (raw['text'] !== undefined) {
+    if (raw['text'] !== 'clear') return { ok: false, reason: 'invalid-text-op' };
+    textOp = 'clear';
+  }
+  let replaceText: string | null = null;
+  if (raw['replaceText'] !== undefined) {
+    const value = raw['replaceText'];
+    if (typeof value !== 'string') return { ok: false, reason: 'replace-text-not-string' };
+    if (value.length > PREVIEW_MAX_REPLACE_TEXT_CHARS) return { ok: false, reason: 'replace-text-too-long' };
+    // Two instructions for one text run, with no defined precedence, would let
+    // the model claim an outcome it cannot actually predict.
+    if (textOp !== null) return { ok: false, reason: 'conflicting-text-ops' };
+    replaceText = value;
+  }
+  let elementOp: 'hide' | 'remove' | null = null;
+  if (raw['element'] !== undefined) {
+    if (raw['element'] !== 'hide' && raw['element'] !== 'remove') {
+      return { ok: false, reason: 'invalid-element-op' };
+    }
+    elementOp = raw['element'];
+  }
+  if (Object.keys(declarations).length === 0 && textOp === null && replaceText === null && elementOp === null) {
+    return { ok: false, reason: 'no-operation' };
+  }
+  return { ok: true, declarations, textOp, replaceText, elementOp };
+}
+
 function parseBoundedId(value: unknown, max: number, allowEmpty = false): string | null {
   if (typeof value !== 'string') return null;
   if (!allowEmpty && value.length === 0) return null;
@@ -1441,6 +1500,26 @@ function hasExactKeys(value: Record<string, unknown>, expected: ReadonlySet<stri
   if (keys.length !== expected.size) return false;
   for (const key of keys) {
     if (!expected.has(key)) return false;
+  }
+  return true;
+}
+
+/**
+ * For payloads where the newer keys are optional. Still an allowlist, and still
+ * exact about which keys must be present, so an invented key cannot ride along.
+ */
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  required: ReadonlySet<string>,
+): boolean {
+  const keys = Object.keys(value);
+  if (keys.length < required.size) return false;
+  for (const key of keys) {
+    if (!allowed.has(key)) return false;
+  }
+  for (const key of required) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) return false;
   }
   return true;
 }
@@ -1517,6 +1596,18 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
       ? options.styleNonce
       : '';
 
+  interface PreviewTextRestore {
+    parent: Node;
+    /**
+     * The first original sibling that is NOT itself being removed. Pointing at a
+     * sibling that teardown is also going to re-create would let two restores
+     * chase the same slot and land in the wrong order.
+     */
+    nextSibling: Node | null;
+    prevSibling: Node | null;
+    data: string;
+  }
+
   interface PreviewLayer {
     key: string;
     bindingId: string;
@@ -1529,6 +1620,18 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
     adoptedSheet: CSSStyleSheet | null;
     anchors: InspectorAnchor[];
     specificity: number;
+    textRestores: PreviewTextRestore[];
+    createdTextNodes: Text[];
+    detachRestores: Array<{ placeholder: Comment; element: Element }>;
+  }
+
+  interface ResolvedPreviewChange {
+    anchor: InspectorAnchor;
+    declarations: Record<string, string>;
+    element: Element;
+    textOp: 'clear' | null;
+    replaceText: string | null;
+    elementOp: 'hide' | 'remove' | null;
   }
 
   interface PreviewIndexEntry {
@@ -2642,6 +2745,65 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
     return { styleElement, adoptedSheet: null };
   }
 
+  function replayPreviewTextRestores(records: PreviewTextRestore[]): void {
+    let previous: Node | null = null;
+    let previousParent: Node | null = null;
+    for (const record of records) {
+      try {
+        // A parent the page has already torn down is not somewhere we may put
+        // text back; re-inserting would rebuild a subtree the host discarded.
+        if (record.parent.isConnected === false) {
+          previous = null;
+          previousParent = null;
+          continue;
+        }
+        const text = document.createTextNode(record.data);
+        const sibling = record.nextSibling;
+        if (sibling !== null && sibling.parentNode === record.parent) {
+          record.parent.insertBefore(text, sibling);
+        } else if (record.prevSibling !== null && record.prevSibling.parentNode === record.parent) {
+          record.parent.insertBefore(text, record.prevSibling.nextSibling);
+        } else if (previous !== null && previousParent === record.parent && previous.parentNode === record.parent) {
+          record.parent.insertBefore(text, previous.nextSibling);
+        } else {
+          record.parent.appendChild(text);
+        }
+        previous = text;
+        previousParent = record.parent;
+      } catch {
+        previous = null;
+        previousParent = null;
+        continue;
+      }
+    }
+  }
+
+  function replayPreviewLayerRestores(layer: PreviewLayer): void {
+    // Detached subtrees first: a descendant whose text was also edited is only
+    // reachable again once its ancestor is back in the document.
+    for (const record of layer.detachRestores) {
+      try {
+        // A placeholder the page moved or dropped means the host rewrote this
+        // part of the tree; re-inserting would resurrect content out of place.
+        if (record.placeholder.isConnected === false) continue;
+        record.placeholder.replaceWith(record.element);
+      } catch {
+        continue;
+      }
+    }
+    layer.detachRestores.length = 0;
+    for (const created of layer.createdTextNodes) {
+      try {
+        created.remove();
+      } catch {
+        continue;
+      }
+    }
+    layer.createdTextNodes.length = 0;
+    replayPreviewTextRestores(layer.textRestores);
+    layer.textRestores.length = 0;
+  }
+
   function removePreviewLayer(key: string): PreviewLayer | null {
     const layer = previewLayers.get(key);
     if (!layer) return null;
@@ -2674,6 +2836,7 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
       removeAdoptedSheet(layer.adoptedSheet);
       layer.adoptedSheet = null;
     }
+    replayPreviewLayerRestores(layer);
     return layer;
   }
 
@@ -2785,11 +2948,111 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
     return { ok: false, status: 'unbound', matchCount: 0 };
   }
 
+  function planPreviewTextRemoval(element: Element): Array<{ node: Text; record: PreviewTextRestore }> | null {
+    let children: ChildNode[];
+    try {
+      children = [...element.childNodes];
+    } catch {
+      return null;
+    }
+    const planned: Array<{ node: Text; record: PreviewTextRestore }> = [];
+    for (let i = 0; i < children.length; i += 1) {
+      const child = children[i];
+      // Child elements are structure, not content. Detaching them would collapse
+      // the very layout the model is being shown, so only text is ever in scope.
+      if (child === undefined || child.nodeType !== 3) continue;
+      const node = child as Text;
+      let nextSibling: Node | null = null;
+      for (let j = i + 1; j < children.length; j += 1) {
+        const candidate = children[j];
+        if (candidate === undefined || candidate.nodeType === 3) continue;
+        nextSibling = candidate;
+        break;
+      }
+      try {
+        planned.push({
+          node,
+          record: { parent: element, nextSibling, prevSibling: node.previousSibling, data: node.data },
+        });
+      } catch {
+        return null;
+      }
+    }
+    // Past the cap the clear would be partial, and a partial text clear is
+    // indistinguishable from a complete one on the page.
+    if (planned.length > PREVIEW_MAX_TEXT_NODES) return null;
+    return planned;
+  }
+
+  function insertPreviewTextAtSlot(element: Element, node: Node, record: PreviewTextRestore): void {
+    const sibling = record.nextSibling;
+    if (sibling !== null && sibling.parentNode === element) {
+      element.insertBefore(node, sibling);
+      return;
+    }
+    if (record.prevSibling !== null && record.prevSibling.parentNode === element) {
+      element.insertBefore(node, record.prevSibling.nextSibling);
+      return;
+    }
+    element.appendChild(node);
+  }
+
+  function applyPreviewTextOperation(
+    layer: PreviewLayer,
+    element: Element,
+    textOp: 'clear' | null,
+    replaceText: string | null,
+  ): boolean {
+    if (textOp === null && replaceText === null) return true;
+    const planned = planPreviewTextRemoval(element);
+    if (planned === null) return false;
+    if (replaceText !== null) {
+      let text: Text;
+      try {
+        text = document.createTextNode(replaceText);
+      } catch {
+        return false;
+      }
+      // Inserted before the detach so the copy lands in the first old text
+      // node's slot, which is the place the model expects to read it from.
+      try {
+        const first = planned[0];
+        if (first === undefined) element.appendChild(text);
+        else insertPreviewTextAtSlot(element, text, first.record);
+        layer.createdTextNodes.push(text);
+      } catch {
+        return false;
+      }
+    }
+    for (const entry of planned) {
+      try {
+        entry.node.remove();
+        // Recorded only once the node has actually left, so teardown can never
+        // re-insert a node the page still holds.
+        layer.textRestores.push(entry.record);
+      } catch {
+        continue;
+      }
+    }
+    return true;
+  }
+
+  function applyPreviewDetachOperation(layer: PreviewLayer, element: Element): boolean {
+    try {
+      const placeholder = document.createComment(PREVIEW_REMOVED_PLACEHOLDER);
+      element.replaceWith(placeholder);
+      layer.detachRestores.push({ placeholder, element });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function applyPreviewLayer(
     bindingId: string,
     transactionId: string,
-    resolved: Array<{ anchor: InspectorAnchor; declarations: Record<string, string>; element: Element }>,
-  ): void {
+    resolved: ResolvedPreviewChange[],
+  ): string[] {
     const key = previewLayerKey(bindingId, transactionId);
     removePreviewLayer(key);
     previewOrdinal += 1;
@@ -2800,15 +3063,23 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
     const rules: string[] = [];
     const marks: Array<{ element: Element; value: string }> = [];
     resolved.forEach((item, index) => {
+      const body = Object.entries(item.declarations).map(([property, propertyValue]) => `${property}:${propertyValue}`);
+      // The `display` denylist exists to stop a model inventing a hiding rule
+      // inside a free-form declarations map. `element: 'hide'` is the same
+      // intent stated as a deliberate operation, and because it lives in the
+      // layer's own rule it is undone with the layer.
+      if (item.elementOp === 'hide') body.push('display:none');
+      const text = body.join(';');
+      if (text === '') return;
       const value = `${token}-${index.toString(36)}`;
       const selector = new Array(specificity).fill(`[${attribute}="${value}"]`).join('');
-      const body = Object.entries(item.declarations)
-        .map(([property, propertyValue]) => `${property}:${propertyValue}`)
-        .join(';');
-      rules.push(`${selector}{${body}}`);
+      rules.push(`${selector}{${text}}`);
       marks.push({ element: item.element, value });
     });
-    const created = createStyleLayer(rules.join('\n'));
+    // A change carrying only a text or element operation has no CSS to scope,
+    // so it must not leave an empty <style> behind for the page to trip over.
+    const created =
+      rules.length === 0 ? { styleElement: null, adoptedSheet: null } : createStyleLayer(rules.join('\n'));
     for (const mark of marks) {
       try {
         mark.element.setAttribute(attribute, mark.value);
@@ -2816,7 +3087,7 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
         continue;
       }
     }
-    previewLayers.set(key, {
+    const layer: PreviewLayer = {
       key,
       bindingId,
       transactionId,
@@ -2828,11 +3099,30 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
       adoptedSheet: created.adoptedSheet,
       anchors: resolved.map((item) => item.anchor),
       specificity,
-    });
+      textRestores: [],
+      createdTextNodes: [],
+      detachRestores: [],
+    };
+    // Registered before the DOM operations so a throw part way through still
+    // leaves something that can replay the half that did happen.
+    previewLayers.set(key, layer);
     const order = previewBindingOrder.get(bindingId) ?? [];
     order.push(key);
     previewBindingOrder.set(bindingId, order);
     trimPreviewLayers(bindingId);
+    const failed: string[] = [];
+    for (const item of resolved) {
+      try {
+        const ok =
+          item.elementOp === 'remove'
+            ? applyPreviewDetachOperation(layer, item.element)
+            : applyPreviewTextOperation(layer, item.element, item.textOp, item.replaceText);
+        if (!ok) failed.push(item.anchor.elementKey);
+      } catch {
+        failed.push(item.anchor.elementKey);
+      }
+    }
+    return failed;
   }
 
   function sendPreviewResult(
@@ -2906,13 +3196,13 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
     const index = buildPreviewIndex();
     const results: PreviewAnchorResult[] = [];
     const seen = new Set<string>();
-    const resolved: Array<{
-      anchor: InspectorAnchor;
-      declarations: Record<string, string>;
-      element: Element;
-    }> = [];
+    const targeted = new Set<Element>();
+    const resolved: ResolvedPreviewChange[] = [];
     for (const rawChange of rawChanges) {
-      if (!isPlainRecord(rawChange) || !hasExactKeys(rawChange, PREVIEW_CHANGE_KEYS)) {
+      if (
+        !isPlainRecord(rawChange) ||
+        !hasOnlyKeys(rawChange, PREVIEW_CHANGE_KEYS, PREVIEW_CHANGE_REQUIRED_KEYS)
+      ) {
         sendPreviewResult('apply', bindingId, transactionId, 'rejected', results, requestId);
         return;
       }
@@ -2921,8 +3211,8 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
         sendPreviewResult('apply', bindingId, transactionId, 'rejected', results, requestId);
         return;
       }
-      const declarations = validatePreviewDeclarations(rawChange['declarations']);
-      if (!declarations.ok) {
+      const change = parsePreviewChange(rawChange);
+      if (!change.ok) {
         pushAnchorResult(results, seen, anchor.elementKey, 'rejected', 0);
         sendPreviewResult('apply', bindingId, transactionId, 'rejected', results, requestId);
         return;
@@ -2936,10 +3226,29 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
         sendPreviewResult('apply', bindingId, transactionId, target.status, results, requestId);
         return;
       }
-      resolved.push({ anchor, declarations: declarations.declarations, element: target.element });
+      // Two rules on one element would fight over the same node, and the order
+      // they resolve in is the order the page happened to be walked in.
+      if (targeted.has(target.element)) {
+        for (const entry of resolved) {
+          pushAnchorResult(results, seen, entry.anchor.elementKey, 'rejected', 1);
+        }
+        pushAnchorResult(results, seen, anchor.elementKey, 'rejected', 1);
+        sendPreviewResult('apply', bindingId, transactionId, 'rejected', results, requestId);
+        return;
+      }
+      targeted.add(target.element);
+      resolved.push({
+        anchor,
+        declarations: change.declarations,
+        element: target.element,
+        textOp: change.textOp,
+        replaceText: change.replaceText,
+        elementOp: change.elementOp,
+      });
     }
+    let failed: string[];
     try {
-      applyPreviewLayer(bindingId, transactionId, resolved);
+      failed = applyPreviewLayer(bindingId, transactionId, resolved);
     } catch {
       for (const entry of resolved) {
         pushAnchorResult(results, seen, entry.anchor.elementKey, 'rejected', 1);
@@ -2947,10 +3256,19 @@ export function initVeraInspectorBridge(options: BridgeOptions) {
       sendPreviewResult('apply', bindingId, transactionId, 'rejected', results, requestId);
       return;
     }
+    const failedKeys = new Set(failed);
     for (const entry of resolved) {
-      pushAnchorResult(results, seen, entry.anchor.elementKey, 'applied', 1);
+      const status: PreviewAnchorStatus = failedKeys.has(entry.anchor.elementKey) ? 'rejected' : 'applied';
+      pushAnchorResult(results, seen, entry.anchor.elementKey, status, 1);
     }
-    sendPreviewResult('apply', bindingId, transactionId, 'applied', results, requestId);
+    sendPreviewResult(
+      'apply',
+      bindingId,
+      transactionId,
+      failedKeys.size === 0 ? 'applied' : 'rejected',
+      results,
+      requestId,
+    );
   }
 
   function handlePreviewUndo(payload: Record<string, unknown>, requestId: string): void {
